@@ -3,6 +3,23 @@ name = "Proyecto-Final"
 version = "0.1.0"
 edition = "2024"
 
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Enable more optimization in the release profile at the cost of compile time.
+[profile.release]
+# Compile the entire crate as one unit.
+# Slows compile times, marginal improvements.
+codegen-units = 1
+# Do a second optimization pass over the entire program, including dependencies.
+# Slows compile times, marginal improvements.
+lto = "thin"
+
 [dependencies]
-bevy = "0.19.1"
-libp2p = "0.56.0"
+bevy = { version = "0.19.1", default = ["fast-compile"], fast-compile = ["dynamic_linking"] }
+libp2p = { version = "0.56.0", features = ["tcp", "tokio", "noise", "yamux", "mdns", "identify", "ping", "macros", "request-response", "cbor"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }

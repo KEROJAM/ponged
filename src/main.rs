@@ -1,6 +1,9 @@
 use bevy::math::bounding::{Aabb2d, BoundingVolume, IntersectsVolume};
 use bevy::prelude::*;
 
+mod networking;
+mod protocol;
+
 #[derive(Component, Default)]
 #[require(Transform)]
 struct Position(Vec2);
@@ -398,7 +401,11 @@ fn handle_collisions(
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
+        .add_plugins(networking::NetworkingPlugin)
         .insert_resource(Score { player: 0, ai: 0 })
+        .init_resource::<networking_demo::Peers>()
+        .init_resource::<networking_demo::RemoteSnapshot>()
+        .add_systems(Startup, networking_demo::setup)
         .add_systems(
             Startup,
             (
@@ -409,6 +416,7 @@ fn main() {
                 spawn_scoreboard,
             ),
         )
+        .add_systems(Update, networking_demo::broadcast_snapshot)
         .add_systems(
             FixedUpdate,
             (
@@ -425,5 +433,123 @@ fn main() {
         )
         .add_observer(reset_ball)
         .add_observer(update_score)
+        .add_observer(networking_demo::on_peer_connected)
+        .add_observer(networking_demo::on_peer_disconnected)
+        .add_observer(networking_demo::on_game_request)
+        .add_observer(networking_demo::on_game_response)
         .run();
+}
+
+/// Contiguous network → game glue: tracks connected peers, pushes a snapshot
+/// of the real game state to them ~10×/s, and keeps the last snapshot the
+/// other side sent us.
+mod networking_demo {
+    use bevy::prelude::*;
+    use libp2p::PeerId;
+
+    use super::protocol::{self, GameSnapshot, Request};
+    use super::{Ai, Ball, Player, Position, Score};
+    use crate::networking::{NetChannels, NetCommand, NetEvent};
+
+    /// Peers we are currently connected to.
+    #[derive(Resource, Default)]
+    pub struct Peers(Vec<PeerId>);
+
+    /// Last snapshot received from the other side, available to game systems.
+    #[derive(Resource, Default)]
+    pub struct RemoteSnapshot(Option<GameSnapshot>);
+
+    /// Monotonic counter stamped into every snapshot we send.
+    #[derive(Resource, Default)]
+    pub struct SnapshotSeq(u64);
+
+    /// Drives how often we push snapshots.
+    #[derive(Resource)]
+    pub struct SnapshotTimer(Timer);
+
+    const SNAPSHOT_INTERVAL: f32 = 0.1;
+
+    pub fn setup(mut commands: Commands) {
+        commands.insert_resource(SnapshotTimer(Timer::from_seconds(
+            SNAPSHOT_INTERVAL,
+            TimerMode::Repeating,
+        )));
+    }
+
+    pub fn on_peer_connected(
+        ev: On<NetEvent>,
+        mut peers: ResMut<Peers>,
+        channels: Res<NetChannels>,
+    ) {
+        if let NetEvent::PeerConnected(peer) = ev.event() {
+            if !peers.0.contains(peer) {
+                peers.0.push(*peer);
+                info!("Peer {peer} connected, saying hello");
+                let _ = channels.commands.send(NetCommand::SendRequest {
+                    peer: *peer,
+                    request: Request::Hello,
+                });
+            }
+        }
+    }
+
+    pub fn on_peer_disconnected(ev: On<NetEvent>, mut peers: ResMut<Peers>) {
+        if let NetEvent::PeerDisconnected(peer) = ev.event() {
+            peers.0.retain(|p| p != peer);
+            info!("Peer {peer} disconnected");
+        }
+    }
+
+    pub fn on_game_request(ev: On<NetEvent>, mut remote: ResMut<RemoteSnapshot>) {
+        if let NetEvent::GameRequest { peer, request } = ev.event() {
+            match request {
+                Request::Hello => info!("Greeting received from {peer}"),
+                Request::State(snapshot) => remote.0 = Some(*snapshot),
+                Request::Paddle { y } => debug!("Paddle y={y} received from {peer}"),
+            }
+        }
+    }
+
+    pub fn on_game_response(ev: On<NetEvent>) {
+        if let NetEvent::GameResponse { peer, response } = ev.event() {
+            debug!("Response from {peer}: {response:?}");
+        }
+    }
+
+    pub fn broadcast_snapshot(
+        time: Res<Time>,
+        mut timer: ResMut<SnapshotTimer>,
+        channels: Res<NetChannels>,
+        peers: Res<Peers>,
+        ball: Single<&Position, With<Ball>>,
+        player: Single<&Position, (With<Player>, Without<Ai>)>,
+        ai: Single<&Position, (With<Ai>, Without<Player>)>,
+        score: Res<Score>,
+        mut seq: ResMut<SnapshotSeq>,
+    ) {
+        if !timer.0.tick(time.delta()).just_finished() {
+            return;
+        }
+
+        let snapshot = GameSnapshot {
+            seq: seq.0,
+            ball: to_point(ball.0),
+            player_paddle: to_point(player.0),
+            opponent_paddle: to_point(ai.0),
+            player_score: score.player,
+            opponent_score: score.ai,
+        };
+        seq.0 += 1;
+
+        for peer in &peers.0 {
+            let _ = channels.commands.send(NetCommand::SendRequest {
+                peer: *peer,
+                request: Request::State(snapshot),
+            });
+        }
+    }
+
+    fn to_point(Vec2 { x, y }: Vec2) -> protocol::Point2 {
+        protocol::Point2 { x, y }
+    }
 }
