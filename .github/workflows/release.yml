@@ -1,0 +1,80 @@
+name: Release Cliente y Servidor
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión de la release (ej. v1.0.0)"
+        required: true
+        type: string
+      descripcion:
+        description: "Descripción de la release (entregas de este sprint)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  compilacion:
+    name: Compilar (${{ matrix.nombre }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            nombre: linux
+            extension: ""
+          - os: windows-latest
+            nombre: windows
+            extension: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Obtener codigo
+        uses: actions/checkout@v4
+
+      - name: Instalar Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Instalar dependencias del sistema (Bevy en Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+
+      - name: Compilar cliente y servidor en release
+        run: cargo build --release --bin "Proyecto-Final" --bin pong-gateway
+
+      - name: Empaquetar binarios
+        run: |
+          mkdir -p dist
+          cp target/release/Proyecto-Final${{ matrix.extension }} dist/pong-cliente-${{ matrix.nombre }}-x86_64${{ matrix.extension }}
+          cp target/release/pong-gateway${{ matrix.extension }} dist/pong-servidor-${{ matrix.nombre }}-x86_64${{ matrix.extension }}
+
+      - name: Subir artefactos
+        uses: actions/upload-artifact@v4
+        with:
+          name: binarios-${{ matrix.nombre }}
+          path: dist/
+
+  release:
+    name: Publicar release
+    needs: compilacion
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obtener codigo
+        uses: actions/checkout@v4
+
+      - name: Descargar artefactos
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Crear tag y release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: "Release ${{ github.event.inputs.version }}"
+          body: ${{ github.event.inputs.descripcion }}
+          files: dist/**/*
