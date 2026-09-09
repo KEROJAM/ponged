@@ -3,6 +3,18 @@ name = "Proyecto-Final"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "proyecto_final"
+path = "src/lib.rs"
+
+[[bin]]
+name = "Proyecto-Final"
+path = "src/main.rs"
+
+[[bin]]
+name = "pong-gateway"
+path = "src/bin/gateway.rs"
+
 [profile.dev]
 opt-level = 1
 
@@ -19,7 +31,8 @@ codegen-units = 1
 lto = "thin"
 
 [dependencies]
-bevy = { version = "0.19.1", default = ["fast-compile"], fast-compile = ["dynamic_linking"] }
-libp2p = { version = "0.56.0", features = ["tcp", "tokio", "noise", "yamux", "mdns", "identify", "ping", "macros", "request-response", "cbor"] }
+bevy = { version = "0.19.1", default-features = false, features = ["2d", "ui"] }
+libp2p = { version = "0.56.0", features = ["tcp", "tokio", "noise", "yamux", "mdns", "identify", "ping", "macros", "request-response", "cbor", "rendezvous", "kad", "relay", "dcutr", "dns"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
