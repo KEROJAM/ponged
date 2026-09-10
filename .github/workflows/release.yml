@@ -33,23 +33,34 @@ jobs:
       - name: Obtener codigo
         uses: actions/checkout@v4
 
-      - name: Instalar Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      # Linux: binarios estaticos musl (sin dependencias de glibc ni libs del sistema).
+      - name: Instalar Nix (Linux)
+        if: runner.os == 'Linux'
+        uses: DeterminateSystems/nix-installer-action@v16
 
-      - name: Instalar dependencias del sistema (Bevy en Linux)
+      - name: Compilar binarios estaticos musl (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+          GATEWAY=$(nix build .#pong-gateway --no-link --print-out-paths)
+          CLIENT=$(nix build .#pong-client --no-link --print-out-paths)
+          mkdir -p dist
+          cp "$GATEWAY/bin/pong-gateway" dist/pong-servidor-linux-x86_64
+          cp "$CLIENT/bin/Proyecto-Final" dist/pong-cliente-linux-x86_64
 
-      - name: Compilar cliente y servidor en release
+      - name: Instalar Rust stable (Windows)
+        if: runner.os == 'Windows'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compilar cliente y servidor en release (Windows)
+        if: runner.os == 'Windows'
         run: cargo build --release --bin "Proyecto-Final" --bin pong-gateway
 
-      - name: Empaquetar binarios
+      - name: Empaquetar binarios (Windows)
+        if: runner.os == 'Windows'
         run: |
           mkdir -p dist
-          cp target/release/Proyecto-Final${{ matrix.extension }} dist/pong-cliente-${{ matrix.nombre }}-x86_64${{ matrix.extension }}
-          cp target/release/pong-gateway${{ matrix.extension }} dist/pong-servidor-${{ matrix.nombre }}-x86_64${{ matrix.extension }}
+          cp target/release/Proyecto-Final.exe dist/pong-cliente-windows-x86_64.exe
+          cp target/release/pong-gateway.exe dist/pong-servidor-windows-x86_64.exe
 
       - name: Subir artefactos
         uses: actions/upload-artifact@v4

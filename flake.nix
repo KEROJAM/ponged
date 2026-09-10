@@ -8,6 +8,12 @@
   outputs = { self, nixpkgs }: let
     pkgs = nixpkgs.legacyPackages."x86_64-linux";
 
+    # Toolchain musl (x86_64-unknown-linux-musl) para binarios Linux 100% estaticos.
+    musl = pkgs.pkgsCross.musl64;
+    static = musl.pkgsStatic;
+    muslRust = musl.rustPlatform;
+    staticFlags = "-C target-feature=+crt-static";
+
   in {
     # ── Development shell (unchanged) ────────────────────────────────
     devShells."x86_64-linux".default = pkgs.mkShell {
@@ -24,30 +30,31 @@
       env.RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
     };
 
-    # ── Gateway binary (headless, no Bevy deps) ─────────────────────
-    packages."x86_64-linux".pong-gateway = pkgs.rustPlatform.buildRustPackage {
+    # ── Gateway binary (headless, musl estatico) ────────────────────
+    packages."x86_64-linux".pong-gateway = muslRust.buildRustPackage {
       pname = "pong-gateway";
       version = "0.1.0";
       src = ./.;
       cargoLock.lockFile = ./Cargo.lock;
-      nativeBuildInputs = [pkgs.pkg-config];
-      buildInputs = [pkgs.openssl pkgs.wayland pkgs.libudev-zero];
+      nativeBuildInputs = [static.pkg-config];
+      buildInputs = [static.wayland static.libudev-zero];
+      RUSTFLAGS = staticFlags;
       cargoBuildFlags = ["--bin" "pong-gateway"];
     };
 
-    # ── Game client binary (Bevy + Vulkan/Wayland) ──────────────────
-    packages."x86_64-linux".pong-client = (pkgs.rustPlatform.buildRustPackage {
+    # ── Game client binary (Bevy + Vulkan, musl estatico) ──────────
+    packages."x86_64-linux".pong-client = (muslRust.buildRustPackage {
       pname = "pong-client";
       version = "0.1.0";
       src = ./.;
       cargoLock.lockFile = ./Cargo.lock;
-      nativeBuildInputs = [pkgs.pkg-config];
+      nativeBuildInputs = [static.pkg-config];
+      RUSTFLAGS = staticFlags;
       cargoBuildFlags = ["--bin" "Proyecto-Final"];
     }).overrideAttrs (old: {
-      buildInputs = (old.buildInputs or []) ++ (with pkgs; [
-        vulkan-loader wayland libxkbcommon
-        libx11 libxcursor libxrandr libxi
-        alsa-lib libudev-zero fontconfig freetype
+      buildInputs = (old.buildInputs or []) ++ (with static; [
+        libudev-zero
+        wayland
       ]);
     });
 
