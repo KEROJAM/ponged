@@ -1,14 +1,14 @@
 [package]
-name = "Proyecto-Final"
+name = "ponged"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "proyecto_final"
+name = "ponged"
 path = "src/lib.rs"
 
 [[bin]]
-name = "Proyecto-Final"
+name = "ponged"
 path = "src/main.rs"
 
 [[bin]]
@@ -31,8 +31,11 @@ codegen-units = 1
 lto = "thin"
 
 [dependencies]
-bevy = { version = "0.19.1", default-features = false, features = ["2d", "ui"] }
+bevy = { version = "0.19.1", default-features = false, features = ["2d", "ui", "x11"] }
 libp2p = { version = "0.56.0", features = ["tcp", "tokio", "noise", "yamux", "mdns", "identify", "ping", "macros", "request-response", "cbor", "rendezvous", "kad", "relay", "dcutr", "dns"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+cbor4ii = "0.3"

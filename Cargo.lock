@@ -3,17 +3,6 @@
 version = 4
 
 [[package]]
-name = "Proyecto-Final"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "libp2p",
- "rusqlite",
- "serde",
- "tokio",
-]
-
-[[package]]
 name = "ab_glyph"
 version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5480,6 +5469,18 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+]
+
+[[package]]
+name = "ponged"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "cbor4ii",
+ "libp2p",
+ "rusqlite",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

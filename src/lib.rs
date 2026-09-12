@@ -1,4 +1,4 @@
-//! Shared code for the Pong P2P project: the game client (`Proyecto-Final`)
+//! Shared code for the Pong P2P project: the game client (`ponged`)
 //! and the gateway server (`pong-gateway`).
 //!
 //! Only protocol types live here; everything game-specific stays inside the

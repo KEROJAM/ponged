@@ -45,7 +45,7 @@ jobs:
           CLIENT=$(nix build .#pong-client --no-link --print-out-paths)
           mkdir -p dist
           cp "$GATEWAY/bin/pong-gateway" dist/pong-servidor-linux-x86_64
-          cp "$CLIENT/bin/Proyecto-Final" dist/pong-cliente-linux-x86_64
+          cp "$CLIENT/bin/ponged" dist/pong-cliente-linux-x86_64
 
       - name: Instalar Rust stable (Windows)
         if: runner.os == 'Windows'
@@ -53,13 +53,13 @@ jobs:
 
       - name: Compilar cliente y servidor en release (Windows)
         if: runner.os == 'Windows'
-        run: cargo build --release --bin "Proyecto-Final" --bin pong-gateway
+        run: cargo build --release --bin ponged --bin pong-gateway
 
       - name: Empaquetar binarios (Windows)
         if: runner.os == 'Windows'
         run: |
           mkdir -p dist
-          cp target/release/Proyecto-Final.exe dist/pong-cliente-windows-x86_64.exe
+          cp target/release/ponged.exe dist/pong-cliente-windows-x86_64.exe
           cp target/release/pong-gateway.exe dist/pong-servidor-windows-x86_64.exe
 
       - name: Subir artefactos
