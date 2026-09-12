@@ -19,9 +19,10 @@
     devShells."x86_64-linux".default = pkgs.mkShell {
       buildInputs = with pkgs; [
        vulkan-loader cargo rustc rustfmt clippy rust-analyzer glib wayland-protocols wayland alsa-lib libudev-zero
+       libxkbcommon libx11 libxcursor libxrandr libxi libxcb
       ];
 
-      LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [ wayland libxkbcommon vulkan-loader ]);
+      LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [ wayland libxkbcommon vulkan-loader libx11 libxcursor libxrandr libxi libxcb ]);
       shellHook = ''
 	      export LD_LIBRARY_PATH=${pkgs.wayland}/lib:$LD_LIBRARY_PATH
 	'';
@@ -50,7 +51,7 @@
       cargoLock.lockFile = ./Cargo.lock;
       nativeBuildInputs = [static.pkg-config];
       RUSTFLAGS = staticFlags;
-      cargoBuildFlags = ["--bin" "Proyecto-Final"];
+      cargoBuildFlags = ["--bin" "ponged"];
     }).overrideAttrs (old: {
       buildInputs = (old.buildInputs or []) ++ (with static; [
         libudev-zero
