@@ -325,8 +325,14 @@ pub fn on_gateway_response(
         return;
     };
     match response {
-        GatewayResponse::Registered { username, rating } => {
-            info!("Registered on gateway as {username} (rating {rating})");
+        GatewayResponse::Registered {
+            username,
+            rating,
+            rank,
+        } => {
+            info!("Registered on gateway as {username} (rating {rating}, rank {rank})");
+            gateway.rank = Some(rank.clone());
+            gateway.rating = *rating;
             gateway.queued = false;
             let _ = channels.commands.send(NetCommand::SendGatewayRequest {
                 peer: *peer,
@@ -341,8 +347,10 @@ pub fn on_gateway_response(
             info!("Left the matchmaking queue");
             gateway.queued = false;
         }
-        GatewayResponse::Rating { rating } => {
-            info!("Gateway rating is now {rating}");
+        GatewayResponse::Rating { rating, rank } => {
+            info!("Gateway rating is now {rating} (rank {rank})");
+            gateway.rank = Some(rank.clone());
+            gateway.rating = *rating;
         }
         GatewayResponse::Pong => {}
         GatewayResponse::Error(err) => {
@@ -670,6 +678,8 @@ pub fn update_menu(
                     reserved: false,
                     queued: false,
                     peer: None,
+                    rank: None,
+                    rating: 0,
                 };
                 let _ = channels.commands.send(NetCommand::Dial(addr));
             }

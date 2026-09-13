@@ -108,22 +108,61 @@ pub enum GatewayRequest {
     /// **Gateway → client.** A match was reserved: `opponent` is the matched
     /// player's base58 `PeerId`; `addresses` are dialable relay/direct
     /// multiaddrs to reach them. Delivered to both sides (via M3).
-    MatchFound { opponent: String, addresses: Vec<Addr> },
+    MatchFound {
+        opponent: String,
+        addresses: Vec<Addr>,
+    },
 }
 
 /// RPC replies from the gateway.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GatewayResponse {
-    /// `username` and current rating after [`GatewayRequest::Register`].
-    Registered { username: String, rating: i32 },
+    /// `username`, current rating and rank after [`GatewayRequest::Register`].
+    Registered {
+        username: String,
+        rating: i32,
+        rank: String,
+    },
     /// Currently queued; `position` is the number of players ahead of us.
-    Queued { position: u32 },
+    Queued {
+        position: u32,
+    },
     /// Left the queue.
     Dequeued,
-    /// The gateway's view of our rating after a report.
-    Rating { rating: i32 },
+    /// The gateway's view of our rating and rank after a report.
+    Rating {
+        rating: i32,
+        rank: String,
+    },
     Pong,
     Error(String),
+}
+
+/// Rank tiers, ordered from lowest to highest. Derived from the ELO rating.
+pub const RANKS: [&str; 9] = [
+    "Brick",
+    "Bronze",
+    "Silver",
+    "Gold",
+    "Platinum",
+    "Diamond",
+    "Obsidian",
+    "Pong Master",
+    "Pong Legend",
+];
+
+/// Lower bound (inclusive) of each rank's ELO range.
+const RANK_THRESHOLDS: [i32; 9] = [0, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400];
+
+/// Maps an ELO rating to one of the [`RANKS`].
+pub fn rank_for_rating(rating: i32) -> &'static str {
+    let mut rank = RANKS[0];
+    for (i, threshold) in RANK_THRESHOLDS.iter().enumerate() {
+        if rating >= *threshold {
+            rank = RANKS[i];
+        }
+    }
+    rank
 }
 
 #[cfg(test)]
@@ -180,5 +219,53 @@ mod tests {
         assert!(!decoded.match_over);
         assert_eq!(decoded.player_score, 1);
         assert_eq!(decoded.ball_speed_mult, 1.0);
+    }
+
+    #[test]
+    fn rank_below_1000_is_brick() {
+        assert_eq!(rank_for_rating(0), "Brick");
+        assert_eq!(rank_for_rating(999), "Brick");
+    }
+
+    #[test]
+    fn rank_at_boundaries() {
+        assert_eq!(rank_for_rating(1000), "Bronze");
+        assert_eq!(rank_for_rating(1199), "Bronze");
+        assert_eq!(rank_for_rating(1200), "Silver");
+        assert_eq!(rank_for_rating(1399), "Silver");
+        assert_eq!(rank_for_rating(1400), "Gold");
+        assert_eq!(rank_for_rating(1599), "Gold");
+        assert_eq!(rank_for_rating(1600), "Platinum");
+        assert_eq!(rank_for_rating(1799), "Platinum");
+        assert_eq!(rank_for_rating(1800), "Diamond");
+        assert_eq!(rank_for_rating(1999), "Diamond");
+        assert_eq!(rank_for_rating(2000), "Obsidian");
+        assert_eq!(rank_for_rating(2199), "Obsidian");
+        assert_eq!(rank_for_rating(2200), "Pong Master");
+        assert_eq!(rank_for_rating(2399), "Pong Master");
+    }
+
+    #[test]
+    fn rank_top_tier() {
+        assert_eq!(rank_for_rating(2400), "Pong Legend");
+        assert_eq!(rank_for_rating(9999), "Pong Legend");
+        assert_eq!(rank_for_rating(i32::MAX), "Pong Legend");
+    }
+
+    #[test]
+    fn negative_ratings_are_brick() {
+        assert_eq!(rank_for_rating(-1), "Brick");
+        assert_eq!(rank_for_rating(i32::MIN), "Brick");
+    }
+
+    #[test]
+    fn gateway_request_roundtrips() {
+        let req = GatewayRequest::MatchFound {
+            opponent: "12D3KooExample".into(),
+            addresses: vec!["/ip4/1.2.3.4/tcp/4001/p2p/test".into()],
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &req).expect("serialize");
+        let decoded: GatewayRequest = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, req);
     }
 }

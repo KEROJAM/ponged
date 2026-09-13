@@ -114,6 +114,10 @@ pub struct GatewayState {
     pub reserved: bool,
     /// We are currently in the matchmaking queue.
     pub queued: bool,
+    /// Our current rank (e.g. "Silver"), as returned by the gateway.
+    pub rank: Option<String>,
+    /// Our current ELO rating.
+    pub rating: i32,
 }
 
 impl GatewayState {

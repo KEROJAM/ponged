@@ -33,20 +33,21 @@ use libp2p::core::multiaddr::Protocol;
 use libp2p::futures::StreamExt;
 use libp2p::identity::Keypair;
 use libp2p::kad::store::MemoryStore;
-use libp2p::request_response::{self, cbor, ProtocolSupport, ResponseChannel};
+use libp2p::request_response::{self, ProtocolSupport, ResponseChannel, cbor};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    identify, kad, noise, ping, relay, rendezvous, tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
+    Multiaddr, PeerId, SwarmBuilder, identify, kad, noise, ping, relay, rendezvous, tcp, yamux,
 };
 use ponged::protocol::{
-    GatewayRequest, GatewayResponse, GATEWAY_AGENT_VERSION, GATEWAY_PROTOCOL,
+    GATEWAY_AGENT_VERSION, GATEWAY_PROTOCOL, GatewayRequest, GatewayResponse, rank_for_rating,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use tokio::time::MissedTickBehavior;
 
 const DEFAULT_LISTEN: &str = "/ip4/0.0.0.0/tcp/4001";
 const DEFAULT_HOST_FALLBACK: &str = "127.0.0.1";
-const START_RATING: i32 = 1200;
+/// Rating granted to new players — inside the Brick range (< 1000).
+const START_RATING: i32 = 800;
 /// Do not pair players whose ELO differs by more than this.
 const MAX_ELO_GAP: i32 = 600;
 /// How often the matchmaking queue is scanned for pairs.
@@ -141,7 +142,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let mut swarm = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
         .with_behaviour(
             |keypair| -> Result<Behaviour, Box<dyn std::error::Error + Send + Sync>> {
                 let peer_id = keypair.public().to_peer_id();
@@ -172,8 +177,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
-    let default_base: Multiaddr = format!("/ip4/{public_host}/tcp/{}", port_of(&listen_addr)?)
-        .parse()?;
+    let default_base: Multiaddr =
+        format!("/ip4/{public_host}/tcp/{}", port_of(&listen_addr)?).parse()?;
 
     swarm.listen_on(listen_addr)?;
 
@@ -319,7 +324,7 @@ fn open_ratings(path: &PathBuf) -> Result<Connection, Box<dyn std::error::Error 
         "CREATE TABLE IF NOT EXISTS players (
             peer_id  TEXT PRIMARY KEY,
             username TEXT NOT NULL,
-            rating   INTEGER NOT NULL DEFAULT 1200
+            rating   INTEGER NOT NULL DEFAULT 800
         );",
     )?;
     Ok(conn)
@@ -360,7 +365,10 @@ fn on_gateway_request(
     let reply = |swarm: &mut libp2p::Swarm<Behaviour>,
                  channel: ResponseChannel<GatewayResponse>,
                  response: GatewayResponse| {
-        let _ = swarm.behaviour_mut().gateway.send_response(channel, response);
+        let _ = swarm
+            .behaviour_mut()
+            .gateway
+            .send_response(channel, response);
     };
 
     match request {
@@ -374,15 +382,27 @@ fn on_gateway_request(
             entry.username = Some(username.clone());
             entry.rating = stored;
             upsert_rating(rating_db, &peer, &username, stored);
-            println!("{peer} registered as '{username}' (rating {stored})");
-            reply(swarm, channel, GatewayResponse::Registered { username, rating: stored });
+            let rank = rank_for_rating(stored);
+            println!("{peer} registered as '{username}' (rating {stored}, rank {rank})");
+            reply(
+                swarm,
+                channel,
+                GatewayResponse::Registered {
+                    username,
+                    rating: stored,
+                    rank: rank.to_string(),
+                },
+            );
         }
         GatewayRequest::QueueMatch => {
             if !queue.contains(&peer) {
                 queue.push(peer);
             }
             let position = queue.iter().position(|p| *p == peer).unwrap_or(0) as u32;
-            println!("{peer} queued (position {position}, queue size {})", queue.len());
+            println!(
+                "{peer} queued (position {position}, queue size {})",
+                queue.len()
+            );
             reply(swarm, channel, GatewayResponse::Queued { position });
         }
         GatewayRequest::LeaveQueue => {
@@ -390,11 +410,18 @@ fn on_gateway_request(
             println!("{peer} left the queue");
             reply(swarm, channel, GatewayResponse::Dequeued);
         }
-        GatewayRequest::ReportResult { opponent, my_score, opponent_score } => {
+        GatewayRequest::ReportResult {
+            opponent,
+            my_score,
+            opponent_score,
+        } => {
             let my_rating = players.get(&peer).map(|p| p.rating).unwrap_or(START_RATING);
             let mut reply_rating = my_rating;
             if let Ok(opponent_id) = opponent.parse::<PeerId>() {
-                let opp_rating = players.get(&opponent_id).map(|p| p.rating).unwrap_or(START_RATING);
+                let opp_rating = players
+                    .get(&opponent_id)
+                    .map(|p| p.rating)
+                    .unwrap_or(START_RATING);
                 let score_a = match my_score.cmp(&opponent_score) {
                     std::cmp::Ordering::Greater => 1.0,
                     std::cmp::Ordering::Less => 0.0,
@@ -414,9 +441,29 @@ fn on_gateway_request(
                     upsert_rating(rating_db, &opponent_id, &username, new_b);
                 }
                 reply_rating = new_a;
-                println!("{peer} reported {my_score}-{opponent_score} vs {opponent_id} → ELO {my_rating}→{new_a}");
+                let rank = rank_for_rating(new_a);
+                println!(
+                    "{peer} reported {my_score}-{opponent_score} vs {opponent_id} → ELO {my_rating}→{new_a} (rank {rank})"
+                );
+                reply(
+                    swarm,
+                    channel,
+                    GatewayResponse::Rating {
+                        rating: reply_rating,
+                        rank: rank.to_string(),
+                    },
+                );
+                return;
             }
-            reply(swarm, channel, GatewayResponse::Rating { rating: reply_rating });
+            let rank = rank_for_rating(reply_rating);
+            reply(
+                swarm,
+                channel,
+                GatewayResponse::Rating {
+                    rating: reply_rating,
+                    rank: rank.to_string(),
+                },
+            );
         }
         GatewayRequest::Ping => {
             reply(swarm, channel, GatewayResponse::Pong);
@@ -440,13 +487,58 @@ fn elo(a: i32, b: i32, score_a: f64) -> (i32, i32) {
     (new_a, new_b)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_ratings_win_moves_expected_amount() {
+        let (a, b) = elo(1200, 1200, 1.0);
+        // Equal rating → expected 0.5, K=32 → winner +16, loser −16.
+        assert_eq!(a, 1216);
+        assert_eq!(b, 1184);
+    }
+
+    #[test]
+    fn equal_ratings_draw_keeps_both() {
+        let (a, b) = elo(1200, 1200, 0.5);
+        assert_eq!(a, 1200);
+        assert_eq!(b, 1200);
+    }
+
+    #[test]
+    fn huge_upset_moves_more() {
+        // Brick (400) beats Pong Legend (2400): a huge upset.
+        let (a, b) = elo(400, 2400, 1.0);
+        assert!(a > 400 + 30, "winner should gain ~32, got {a}");
+        assert_eq!(b, 2368);
+    }
+
+    #[test]
+    fn favorite_win_moves_little() {
+        // Pong Legend (2400) beats Brick (400): nearly no movement.
+        let (a, b) = elo(2400, 400, 1.0);
+        assert_eq!(a, 2400);
+        assert_eq!(b, 400);
+    }
+
+    #[test]
+    fn ratings_swap_symmetrically() {
+        let (a, b) = elo(1500, 1300, 0.0);
+        let (a2, b2) = elo(1300, 1500, 1.0);
+        assert_eq!(a, b2);
+        assert_eq!(b, a2);
+    }
+
+    #[test]
+    fn new_players_start_as_brick() {
+        assert_eq!(rank_for_rating(START_RATING), "Brick");
+    }
+}
+
 /// Builds the relayed addresses `target` can be reached at through this
 /// gateway, from the perspective of the bases the requester knows about.
-fn circuit_addresses(
-    bases: &[Multiaddr],
-    relay_peer: PeerId,
-    target: PeerId,
-) -> Vec<String> {
+fn circuit_addresses(bases: &[Multiaddr], relay_peer: PeerId, target: PeerId) -> Vec<String> {
     bases
         .iter()
         .map(|base| {
@@ -506,19 +598,19 @@ fn run_matchmaking(
         let addrs_b = circuit_addresses(&bases_b, *relay_peer, a);
 
         println!("matching {a} ↔ {b}");
-        swarm
-            .behaviour_mut()
-            .gateway
-            .send_request(&a, GatewayRequest::MatchFound {
+        swarm.behaviour_mut().gateway.send_request(
+            &a,
+            GatewayRequest::MatchFound {
                 opponent: b.to_base58(),
                 addresses: addrs_a,
-            });
-        swarm
-            .behaviour_mut()
-            .gateway
-            .send_request(&b, GatewayRequest::MatchFound {
+            },
+        );
+        swarm.behaviour_mut().gateway.send_request(
+            &b,
+            GatewayRequest::MatchFound {
                 opponent: a.to_base58(),
                 addresses: addrs_b,
-            });
+            },
+        );
     }
 }
