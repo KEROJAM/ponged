@@ -53,8 +53,13 @@ fn default_ball_speed_mult() -> f32 {
 /// Requests sent over the `/pong/state/1.0.0` protocol.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
-    /// Greet the other side after connecting.
-    Hello,
+    /// Greet the other side after connecting, carrying our display name so the
+    /// peer can label us in its player graph. `name` defaults to empty for
+    /// peers that don't send one.
+    Hello {
+        #[serde(default)]
+        name: String,
+    },
     /// Ask the other side for a match ("let's play"). The receiver accepts by
     /// replying with [`Request::MatchStart`].
     InviteToPlay,
@@ -62,8 +67,6 @@ pub enum Request {
     MatchStart,
     /// Push a fresh authoritative snapshot to the other side.
     State(GameSnapshot),
-    /// Tell the other side where this player's paddle is.
-    Paddle { y: f32 },
     /// The host hands authority (and its last authoritative snapshot) to the
     /// guest before leaving. The guest becomes host and keeps the match going.
     MigrateHost(GameSnapshot),
@@ -171,6 +174,43 @@ mod tests {
     use serde::Serialize;
 
     #[test]
+    fn rank_below_1000_is_brick() {
+        assert_eq!(rank_for_rating(0), "Brick");
+        assert_eq!(rank_for_rating(999), "Brick");
+    }
+
+    #[test]
+    fn rank_at_boundaries() {
+        assert_eq!(rank_for_rating(1000), "Bronze");
+        assert_eq!(rank_for_rating(1199), "Bronze");
+        assert_eq!(rank_for_rating(1200), "Silver");
+        assert_eq!(rank_for_rating(1399), "Silver");
+        assert_eq!(rank_for_rating(1400), "Gold");
+        assert_eq!(rank_for_rating(1599), "Gold");
+        assert_eq!(rank_for_rating(1600), "Platinum");
+        assert_eq!(rank_for_rating(1799), "Platinum");
+        assert_eq!(rank_for_rating(1800), "Diamond");
+        assert_eq!(rank_for_rating(1999), "Diamond");
+        assert_eq!(rank_for_rating(2000), "Obsidian");
+        assert_eq!(rank_for_rating(2199), "Obsidian");
+        assert_eq!(rank_for_rating(2200), "Pong Master");
+        assert_eq!(rank_for_rating(2399), "Pong Master");
+    }
+
+    #[test]
+    fn rank_top_tier() {
+        assert_eq!(rank_for_rating(2400), "Pong Legend");
+        assert_eq!(rank_for_rating(9999), "Pong Legend");
+        assert_eq!(rank_for_rating(i32::MAX), "Pong Legend");
+    }
+
+    #[test]
+    fn negative_ratings_are_brick() {
+        assert_eq!(rank_for_rating(-1), "Brick");
+        assert_eq!(rank_for_rating(i32::MIN), "Brick");
+    }
+
+    #[test]
     fn snapshot_roundtrips_through_cbor() {
         let snap = GameSnapshot {
             seq: 42,
@@ -222,40 +262,18 @@ mod tests {
     }
 
     #[test]
-    fn rank_below_1000_is_brick() {
-        assert_eq!(rank_for_rating(0), "Brick");
-        assert_eq!(rank_for_rating(999), "Brick");
-    }
-
-    #[test]
-    fn rank_at_boundaries() {
-        assert_eq!(rank_for_rating(1000), "Bronze");
-        assert_eq!(rank_for_rating(1199), "Bronze");
-        assert_eq!(rank_for_rating(1200), "Silver");
-        assert_eq!(rank_for_rating(1399), "Silver");
-        assert_eq!(rank_for_rating(1400), "Gold");
-        assert_eq!(rank_for_rating(1599), "Gold");
-        assert_eq!(rank_for_rating(1600), "Platinum");
-        assert_eq!(rank_for_rating(1799), "Platinum");
-        assert_eq!(rank_for_rating(1800), "Diamond");
-        assert_eq!(rank_for_rating(1999), "Diamond");
-        assert_eq!(rank_for_rating(2000), "Obsidian");
-        assert_eq!(rank_for_rating(2199), "Obsidian");
-        assert_eq!(rank_for_rating(2200), "Pong Master");
-        assert_eq!(rank_for_rating(2399), "Pong Master");
-    }
-
-    #[test]
-    fn rank_top_tier() {
-        assert_eq!(rank_for_rating(2400), "Pong Legend");
-        assert_eq!(rank_for_rating(9999), "Pong Legend");
-        assert_eq!(rank_for_rating(i32::MAX), "Pong Legend");
-    }
-
-    #[test]
-    fn negative_ratings_are_brick() {
-        assert_eq!(rank_for_rating(-1), "Brick");
-        assert_eq!(rank_for_rating(i32::MIN), "Brick");
+    fn hello_carries_name() {
+        let req = Request::Hello {
+            name: "test_player".into(),
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &req).expect("serialize");
+        let decoded: Request = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(
+            decoded,
+            Request::Hello {
+                name: "test_player".into()
+            }
+        );
     }
 
     #[test]

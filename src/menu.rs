@@ -1,10 +1,15 @@
+use std::collections::HashMap;
+
+use bevy::asset::AssetId;
 use bevy::prelude::*;
+use bevy::text::{EditableText, Font};
+use bevy::input_focus::AutoFocus;
 use libp2p::core::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
 
 use super::AppState;
 use crate::history::MatchHistory;
-use crate::networking::{short_peer, GatewayState, NetChannels, NetCommand, NetEvent};
+use crate::networking::{GatewayState, NetChannels, NetCommand, NetEvent, short_peer};
 use crate::networking_demo::{IsHost, Peers, RemoteWorld};
 use crate::sim::{self, MatchSim};
 use ponged::protocol::{GatewayRequest, GatewayResponse, Request as GameRequest};
@@ -12,12 +17,91 @@ use ponged::protocol::{GatewayRequest, GatewayResponse, Request as GameRequest};
 /// Default gateway address to dial. Override with `PONG_GATEWAY`.
 const GATEWAY_DEFAULT_ADDR: &str = "/ip4/127.0.0.1/tcp/4001";
 
+/// World-space orbit for the network of players.
+const ORBIT_CENTER: Vec2 = Vec2::new(240.0, 0.0);
+const ORBIT_RADIUS: f32 = 130.0;
+/// Base angular speed (rad/s) of the player bubbles around the hub.
+const ORBIT_SPEED: f32 = 0.9;
+/// Per-bubble speed is this factor times the base, so they drift apart over
+/// time instead of moving in lockstep.
+const ORBIT_SPEED_MIN: f32 = 0.7;
+const ORBIT_SPEED_MAX: f32 = 1.3;
+/// How strongly the central hub breathes (scale oscillation).
+const HUB_PULSE_AMOUNT: f32 = 0.15;
+/// How strongly each player bubble breathes while orbiting.
+const BUBBLE_PULSE_AMOUNT: f32 = 0.18;
+/// Orbital animation speed multiplier.
+const ORBIT_ANIM_BASE: f32 = 2.0;
+const NODE_LABEL_OFFSET: Vec2 = Vec2::new(0.0, 22.0);
+/// How many player bubbles the graph keeps on screen at once.
+const MAX_NODES: usize = 12;
+
+const DIM: Color = Color::srgb(0.7, 0.7, 0.75);
+const NODE_FONT: f32 = 16.0;
+
 /// What the local player is currently doing on the matchmaking screen.
 #[derive(Resource, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MatchIntent {
     #[default]
     Idle,
     Hosting,
+}
+
+/// Our display name. Loaded from the local settings DB, editable from the
+/// options screen and sent to the gateway and to other players.
+#[derive(Resource)]
+pub struct Username(pub String);
+
+impl Default for Username {
+    fn default() -> Self {
+        Username("Player".to_string())
+    }
+}
+
+/// Display names learned from connected peers via `Request::Hello { name }`.
+#[derive(Resource, Default)]
+pub struct PeerNames(pub HashMap<PeerId, String>);
+
+/// When true, "Jugar" keeps the hunt running: gateway queue plus automatic
+/// invitations to every LAN player that appears.
+#[derive(Resource, Default)]
+pub struct AutoSearch(pub bool);
+
+/// Whether the options overlay is on screen.
+#[derive(Resource, Default)]
+pub struct OptionsOpen(pub bool);
+
+/// True until the player has picked a name on first launch.
+#[derive(Resource, Default)]
+pub struct NeedsOnboarding(pub bool);
+
+/// How often we re-query the gateway's rendezvous server for players while
+/// searching (M3), so new hosts appear in the roster in real time.
+const DISCOVERY_INTERVAL_SECS: f32 = 5.0;
+
+/// Periodic rendezvous discovery poll, active while "Jugar" is running.
+#[derive(Resource)]
+pub struct DiscoveryTimer(Timer);
+
+impl Default for DiscoveryTimer {
+    fn default() -> Self {
+        DiscoveryTimer(Timer::from_seconds(
+            DISCOVERY_INTERVAL_SECS,
+            TimerMode::Repeating,
+        ))
+    }
+}
+
+/// Per-player orbit angle for the node network.
+#[derive(Resource, Default)]
+pub struct OrbitState(pub HashMap<PeerId, f32>);
+
+/// Shared meshes/materials for the node network, created on menu entry.
+#[derive(Resource)]
+pub struct GraphAssets {
+    dot: Handle<Mesh>,
+    line: Handle<Mesh>,
+    material: Handle<ColorMaterial>,
 }
 
 /// Who we are (or will be) playing against. `None` while in the menu.
@@ -38,215 +122,399 @@ pub struct LocalPeerId(pub Option<PeerId>);
 #[derive(Resource, Default)]
 pub struct GatewayMatch(pub Option<PeerId>);
 
-// --- UI marker components -------------------------------------------------
+// --- Marker components -----------------------------------------------------
 
 #[derive(Component)]
 pub struct MenuRoot;
 #[derive(Component)]
-pub struct YourIdText;
+pub struct OptionsRoot;
 #[derive(Component)]
-pub struct StatusText;
+pub struct OptionsInput;
 #[derive(Component)]
-pub struct GatewayStatusText;
+pub struct OnboardingRoot;
 #[derive(Component)]
-pub struct HostButton;
+pub struct OnboardingInput;
 #[derive(Component)]
-pub struct GatewayButton;
+pub struct OnboardingButton;
 #[derive(Component)]
-pub struct JoinQueueButton;
+pub struct MenuField;
 #[derive(Component)]
-pub struct LeaveQueueButton;
+pub struct NodeHub;
 #[derive(Component)]
-pub struct PlayerList;
-/// One entry in the player list; holds the peer that button challenges.
+pub struct NodeHubLabel;
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub struct NodeOf(pub PeerId);
 #[derive(Component)]
-pub struct ChallengeButton(PeerId);
+pub struct NodeBubble;
 #[derive(Component)]
-pub struct HistoryList;
+pub struct NodeLink;
+#[derive(Component)]
+pub struct NodeLabel;
+#[derive(Component)]
+pub struct ButtonText;
 
-/// Identifies which status line a `Text` node belongs to, so `update_menu` can
-/// address all of them through a single query.
+/// Which text line a label node belongs to.
 #[derive(Clone, Copy, Component, PartialEq, Eq)]
-pub enum MenuLabel {
+pub enum TextLine {
     You,
     Status,
     Gateway,
+    Record,
 }
 
-/// Identifies which menu button a UI node is, so `update_menu` can find all
-/// four through a single query (keeps the system under Bevy's 16-param limit).
-#[derive(Clone, Copy, Component)]
+/// The main staircase menu buttons.
+#[derive(Clone, Copy, Component, PartialEq, Eq)]
 pub enum MenuButton {
-    Host,
-    ConnectGateway,
-    JoinQueue,
-    LeaveQueue,
+    Play,
+    Options,
+    Quit,
 }
 
-/// Tracks what the player list currently shows, so we rebuild it when the set
-/// of connected peers changes (regardless of change-detection timing).
-#[derive(Resource, Default)]
-pub struct PlayerListState(Vec<PeerId>);
-
-/// Tracks the rendered revision of the match history panel.
-#[derive(Resource, Default)]
-pub struct HistoryRender {
-    pub rev: u32,
+/// Buttons on the options overlay.
+#[derive(Clone, Copy, Component, PartialEq, Eq)]
+pub enum OptionsButton {
+    Save,
+    Back,
 }
 
-const ACCENT: Color = Color::srgb(0.15, 0.55, 0.95);
-const GREEN: Color = Color::srgb(0.2, 0.7, 0.35);
-const DIM: Color = Color::srgb(0.85, 0.85, 0.9);
+/// Loads persisted settings at startup and seeds the username resource.
+pub fn load_settings(mut commands: Commands, mut history: ResMut<MatchHistory>) {
+    history.ensure_open();
+    let stored = history.load_username().filter(|n| !n.trim().is_empty());
+    let username = stored.clone().unwrap_or_else(|| "Player".to_string());
+    commands.insert_resource(Username(username));
+    commands.insert_resource(NeedsOnboarding(stored.is_none()));
+    info!("Local username: {:?}", stored);
+}
 
-/// Builds the matchmaking screen.
-pub fn spawn_menu(mut commands: Commands) {
+/// Replaces Bevy's stock default font (a small Fira Mono subset that lacks the
+/// accented Spanish characters) with the bundled DejaVu Sans, which covers
+/// á é í ó ú ñ ¡ ¿ · … everywhere text is rendered.
+pub fn install_default_font(mut fonts: ResMut<Assets<Font>>) {
+    let Some(font) = fonts.get_mut_untracked(AssetId::default()) else {
+        return;
+    };
+    const DEJAVU_SANS: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
+    *font = Font::from_bytes(DEJAVU_SANS.to_vec());
+}
+
+/// Builds the matchmaking screen: transparent UI over the pong field (black
+/// background), left-aligned title, staircase buttons and the player network.
+pub fn spawn_menu(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    username: Res<Username>,
+) {
+    let gutter_mesh = meshes.add(Rectangle::new(800.0, 20.0));
+    let net_mesh = meshes.add(Rectangle::new(4.0, 560.0));
+    let dot = meshes.add(Circle::new(9.0));
+    let hub_dot = meshes.add(Circle::new(13.0));
+    let line = meshes.add(Rectangle::new(1.0, 1.0));
+    let white = materials.add(Color::WHITE);
+
+    commands.insert_resource(GraphAssets {
+        dot: dot.clone(),
+        line: line.clone(),
+        material: white.clone(),
+    });
+
+    commands.spawn((
+        MenuField,
+        Mesh2d(gutter_mesh.clone()),
+        MeshMaterial2d(white.clone()),
+        Transform::from_translation(Vec3::new(0.0, 280.0, 0.0)),
+    ));
+    commands.spawn((
+        MenuField,
+        Mesh2d(gutter_mesh),
+        MeshMaterial2d(white.clone()),
+        Transform::from_translation(Vec3::new(0.0, -280.0, 0.0)),
+    ));
+    commands.spawn((
+        MenuField,
+        Mesh2d(net_mesh),
+        MeshMaterial2d(white.clone()),
+        Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+    ));
+
+    commands.spawn((
+        NodeHub,
+        Mesh2d(hub_dot),
+        MeshMaterial2d(white.clone()),
+        Transform::from_translation(ORBIT_CENTER.extend(0.0)),
+    ));
+    commands.spawn((
+        NodeHubLabel,
+        Text2d::new(username.0.clone()),
+        TextFont::from_font_size(NODE_FONT),
+        TextColor(Color::WHITE),
+        Transform::from_translation((ORBIT_CENTER + Vec2::new(0.0, -34.0)).extend(0.0)),
+    ));
+
     commands.spawn((
         MenuRoot,
         Node {
             width: percent(100.),
             height: percent(100.),
             flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
-            row_gap: px(12.),
+            align_items: AlignItems::FlexStart,
+            row_gap: px(8.),
+            padding: UiRect::left(px(80.)),
             ..default()
         },
         children![
             (
-                Text::new("P O N G"),
-                TextFont::from_font_size(88.0),
+                Text::new("ponged"),
+                TextFont::from_font_size(96.0),
                 TextColor(Color::WHITE),
-                TextLayout::justify(Justify::Center),
+                TextLayout::justify(Justify::Left),
             ),
-            (YourIdText, MenuLabel::You, Text::new("You are ..."), TextFont::from_font_size(16.0), TextColor(DIM)),
-            (StatusText, MenuLabel::Status, Text::new("Scanning the local network..."), TextFont::from_font_size(20.0), TextColor(DIM)),
-            (GatewayStatusText, MenuLabel::Gateway, Text::new("Gateway: not connected"), TextFont::from_font_size(16.0), TextColor(DIM)),
             (
-                Text::new("How to play"),
-                TextFont::from_font_size(13.0),
+                TextLine::You,
+                Text::new("Player"),
+                TextFont::from_font_size(16.0),
                 TextColor(DIM),
-                TextLayout::justify(Justify::Center),
             ),
             (
-                HostButton,
-                MenuButton::Host,
-                Button,
-                Node {
-                    min_width: px(220.),
-                    padding: UiRect::axes(px(22.), px(8.)),
-                    border: UiRect::all(px(2.)),
-                    ..default()
-                },
-                BackgroundColor(ACCENT),
-                BorderColor::all(Color::WHITE),
-                children![(
-                    Text::new("Host a match"),
-                    TextFont::from_font_size(22.0),
-                    TextColor(Color::WHITE),
-                )],
-            ),
-            (
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    column_gap: px(10.),
-                    ..default()
-                },
-                children![
-                    (
-                        GatewayButton,
-                        MenuButton::ConnectGateway,
-                        Button,
-                        Node {
-                            min_width: px(190.),
-                            padding: UiRect::axes(px(16.), px(6.)),
-                            border: UiRect::all(px(2.)),
-                            ..default()
-                        },
-                        BackgroundColor(GREEN),
-                        BorderColor::all(Color::WHITE),
-                        children![(
-                            Text::new("Connect to gateway"),
-                            TextFont::from_font_size(18.0),
-                            TextColor(Color::WHITE),
-                        )],
-                    ),
-                    (
-                        JoinQueueButton,
-                        MenuButton::JoinQueue,
-                        Button,
-                        Node {
-                            min_width: px(190.),
-                            padding: UiRect::axes(px(16.), px(6.)),
-                            border: UiRect::all(px(2.)),
-                            ..default()
-                        },
-                        BackgroundColor(ACCENT),
-                        BorderColor::all(Color::WHITE),
-                        children![(
-                            Text::new("Join WAN queue"),
-                            TextFont::from_font_size(18.0),
-                            TextColor(Color::WHITE),
-                        )],
-                    ),
-                    (
-                        LeaveQueueButton,
-                        MenuButton::LeaveQueue,
-                        Button,
-                        Node {
-                            min_width: px(150.),
-                            padding: UiRect::axes(px(16.), px(6.)),
-                            border: UiRect::all(px(2.)),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.65, 0.2, 0.2)),
-                        BorderColor::all(Color::WHITE),
-                        children![(
-                            Text::new("Leave queue"),
-                            TextFont::from_font_size(18.0),
-                            TextColor(Color::WHITE),
-                        )],
-                    ),
-                ],
-            ),
-            (
-                Text::new("Players found:"),
+                TextLine::Status,
+                Text::new("Listo. Pulsa Jugar para buscar rivales (LAN + WAN)."),
                 TextFont::from_font_size(18.0),
                 TextColor(DIM),
             ),
             (
-                PlayerList,
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: px(6.),
-                    ..default()
-                },
-            ),
-            (
-                Text::new("Match history & ranking:"),
-                TextFont::from_font_size(18.0),
+                TextLine::Gateway,
+                Text::new("Gateway: no conectado"),
+                TextFont::from_font_size(14.0),
                 TextColor(DIM),
             ),
+            menu_button(MenuButton::Play, "Jugar"),
+            menu_button(MenuButton::Options, "Opciones"),
+            menu_button(MenuButton::Quit, "Salir"),
             (
-                HistoryList,
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: px(4.),
-                    ..default()
-                },
+                TextLine::Record,
+                Text::new(""),
+                TextFont::from_font_size(14.0),
+                TextColor(DIM),
             ),
         ],
     ));
+
+    commands.spawn((
+        OptionsRoot,
+        Node {
+            width: percent(100.),
+            height: percent(100.),
+            position_type: PositionType::Absolute,
+            display: Display::None,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
+        children![(
+            Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: px(16.),
+                padding: UiRect::all(px(36.)),
+                border: UiRect::all(px(2.)),
+                ..default()
+            },
+            BackgroundColor(Color::BLACK),
+            BorderColor::all(Color::WHITE),
+            children![
+                (
+                    Text::new("Opciones"),
+                    TextFont::from_font_size(48.0),
+                    TextColor(Color::WHITE),
+                ),
+                (
+                    Text::new("Tu nombre:"),
+                    TextFont::from_font_size(18.0),
+                    TextColor(DIM),
+                ),
+                (
+                    OptionsInput,
+                    EditableText::new(username.0.clone()),
+                    TextFont::from_font_size(24.0),
+                    TextColor(Color::WHITE),
+                    Node {
+                        width: px(260.),
+                        height: px(44.),
+                        border: UiRect::all(px(2.)),
+                        padding: UiRect::axes(px(10.), px(8.)),
+                        ..default()
+                    },
+                    BorderColor::all(Color::WHITE),
+                ),
+                (
+                    OptionsButton::Save,
+                    Button,
+                    Node {
+                        min_width: px(180.),
+                        padding: UiRect::axes(px(26.), px(10.)),
+                        border: UiRect::all(px(2.)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::WHITE),
+                    BorderColor::all(Color::WHITE),
+                    children![(
+                        ButtonText,
+                        Text::new("Guardar"),
+                        TextFont::from_font_size(22.0),
+                        TextColor(Color::BLACK),
+                    )],
+                ),
+                (
+                    OptionsButton::Back,
+                    Button,
+                    Node {
+                        min_width: px(180.),
+                        padding: UiRect::axes(px(26.), px(10.)),
+                        border: UiRect::all(px(2.)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                    BorderColor::all(Color::WHITE),
+                    children![(
+                        ButtonText,
+                        Text::new("Volver"),
+                        TextFont::from_font_size(22.0),
+                        TextColor(Color::WHITE),
+                    )],
+                ),
+            ],
+        ),],
+    ));
+
+    commands.spawn((
+        OnboardingRoot,
+        Node {
+            width: percent(100.),
+            height: percent(100.),
+            position_type: PositionType::Absolute,
+            display: Display::None,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
+        children![(
+            Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: px(16.),
+                padding: UiRect::all(px(36.)),
+                border: UiRect::all(px(2.)),
+                ..default()
+            },
+            BackgroundColor(Color::BLACK),
+            BorderColor::all(Color::WHITE),
+            children![
+                (
+                    Text::new("¡Bienvenido a PONG!"),
+                    TextFont::from_font_size(48.0),
+                    TextColor(Color::WHITE),
+                ),
+                (
+                    Text::new("¿Cómo te llamas?"),
+                    TextFont::from_font_size(18.0),
+                    TextColor(DIM),
+                ),
+                (
+                    OnboardingInput,
+                    AutoFocus,
+                    EditableText::new(username.0.clone()),
+                    TextFont::from_font_size(24.0),
+                    TextColor(Color::WHITE),
+                    Node {
+                        width: px(260.),
+                        height: px(44.),
+                        border: UiRect::all(px(2.)),
+                        padding: UiRect::axes(px(10.), px(8.)),
+                        ..default()
+                    },
+                    BorderColor::all(Color::WHITE),
+                ),
+                (
+                    OnboardingButton,
+                    Button,
+                    Node {
+                        min_width: px(180.),
+                        padding: UiRect::axes(px(26.), px(10.)),
+                        border: UiRect::all(px(2.)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::WHITE),
+                    BorderColor::all(Color::WHITE),
+                    children![(
+                        ButtonText,
+                        Text::new("Continuar"),
+                        TextFont::from_font_size(22.0),
+                        TextColor(Color::BLACK),
+                    )],
+                ),
+            ],
+        ),],
+    ));
 }
 
-/// Removes the matchmaking screen (children despawn with the root).
-pub fn despawn_menu(mut commands: Commands, menu: Query<Entity, With<MenuRoot>>) {
+/// Width of each staircase button: "Jugar" is the longest and the rest step
+/// down like a bar chart.
+fn menu_button_width(action: MenuButton) -> f32 {
+    match action {
+        MenuButton::Play => 380.0,
+        MenuButton::Options => 300.0,
+        MenuButton::Quit => 220.0,
+    }
+}
+
+fn menu_button(action: MenuButton, label: &str) -> impl Bundle {
+    (
+        action,
+        Button,
+        Node {
+            width: px(menu_button_width(action)),
+            padding: UiRect::axes(px(26.), px(10.)),
+            border: UiRect::all(px(2.)),
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+        BorderColor::all(Color::WHITE),
+        children![(
+            ButtonText,
+            Text::new(label),
+            TextFont::from_font_size(26.0),
+            TextColor(Color::WHITE),
+        )],
+    )
+}
+
+/// Removes the matchmaking screen, the field décor and the player network.
+#[allow(clippy::type_complexity)]
+pub fn despawn_menu(
+    mut commands: Commands,
+    menu: Query<
+        Entity,
+        Or<(
+            With<MenuRoot>,
+            With<OptionsRoot>,
+            With<OnboardingRoot>,
+            With<MenuField>,
+            With<NodeHub>,
+            With<NodeHubLabel>,
+            With<NodeBubble>,
+            With<NodeLink>,
+            With<NodeLabel>,
+        )>,
+    >,
+) {
     for entity in &menu {
         commands.entity(entity).despawn();
     }
+    commands.remove_resource::<GraphAssets>();
 }
 
 /// Records our own peer id for display in the menu.
@@ -272,8 +540,6 @@ pub fn on_identity(
     info!("Identified gateway {peer}");
     gateway.peer = Some(*peer);
     gateway.connected = true;
-    // Reserve a relay circuit through the gateway: listen on the combined
-    // "<gateway addr>/p2p/<gateway>/p2p-circuit" address.
     if let Some(mut addr) = gateway.base_addr() {
         addr.push(Protocol::P2p(*peer));
         addr.push(Protocol::P2pCircuit);
@@ -286,10 +552,14 @@ pub fn on_identity(
 pub fn on_relay_reservation(
     ev: On<NetEvent>,
     mut gateway: ResMut<GatewayState>,
-    local: Res<LocalPeerId>,
+    username: Res<Username>,
     channels: Res<NetChannels>,
 ) {
-    let NetEvent::RelayReservation { relay_peer, success } = ev.event() else {
+    let NetEvent::RelayReservation {
+        relay_peer,
+        success,
+    } = ev.event()
+    else {
         return;
     };
     if !success {
@@ -298,20 +568,16 @@ pub fn on_relay_reservation(
     if gateway.peer.is_some_and(|p| p == *relay_peer) {
         gateway.reserved = true;
         info!("Relay reservation ready on gateway {relay_peer}");
-        if let Some(local) = local.0 {
-            let username = format!("player-{}", short_peer(local));
-            let _ = channels.commands.send(NetCommand::SendGatewayRequest {
-                peer: *relay_peer,
-                request: GatewayRequest::Register {
-                    username: username.clone(),
-                },
-            });
-            // Publish on the rendezvous namespace so other clients can find us.
-            let _ = channels.commands.send(NetCommand::RendezvousRegister {
-                peer: *relay_peer,
-                namespace: "/pong/all".to_string(),
-            });
-        }
+        let _ = channels.commands.send(NetCommand::SendGatewayRequest {
+            peer: *relay_peer,
+            request: GatewayRequest::Register {
+                username: username.0.clone(),
+            },
+        });
+        let _ = channels.commands.send(NetCommand::RendezvousRegister {
+            peer: *relay_peer,
+            namespace: "/pong/all".to_string(),
+        });
     }
 }
 
@@ -319,6 +585,7 @@ pub fn on_relay_reservation(
 pub fn on_gateway_response(
     ev: On<NetEvent>,
     mut gateway: ResMut<GatewayState>,
+    search: Res<AutoSearch>,
     channels: Res<NetChannels>,
 ) {
     let NetEvent::GatewayResponse { peer, response } = ev.event() else {
@@ -334,10 +601,12 @@ pub fn on_gateway_response(
             gateway.rank = Some(rank.clone());
             gateway.rating = *rating;
             gateway.queued = false;
-            let _ = channels.commands.send(NetCommand::SendGatewayRequest {
-                peer: *peer,
-                request: GatewayRequest::QueueMatch,
-            });
+            if search.0 {
+                let _ = channels.commands.send(NetCommand::SendGatewayRequest {
+                    peer: *peer,
+                    request: GatewayRequest::QueueMatch,
+                });
+            }
         }
         GatewayResponse::Queued { position } => {
             info!("In matchmaking queue (position {position})");
@@ -371,7 +640,10 @@ pub fn on_gateway_request(
         return;
     };
     match request {
-        GatewayRequest::MatchFound { opponent, addresses } => {
+        GatewayRequest::MatchFound {
+            opponent,
+            addresses,
+        } => {
             let Ok(opponent_peer) = opponent.parse::<PeerId>() else {
                 warn!("Gateway sent unparseable opponent id: {opponent}");
                 return;
@@ -392,11 +664,7 @@ pub fn on_gateway_request(
 }
 
 /// Dial newly discovered rendezvous peers so they land in the roster.
-pub fn on_rendezvous_discovered(
-    ev: On<NetEvent>,
-    peers: Res<Peers>,
-    channels: Res<NetChannels>,
-) {
+pub fn on_rendezvous_discovered(ev: On<NetEvent>, peers: Res<Peers>, channels: Res<NetChannels>) {
     let NetEvent::RendezvousDiscovered { peers: found } = ev.event() else {
         return;
     };
@@ -408,6 +676,37 @@ pub fn on_rendezvous_discovered(
         for addr in addrs {
             let _ = channels.commands.send(NetCommand::Dial(addr.clone()));
         }
+    }
+}
+
+/// Re-queries the gateway's rendezvous server while "Jugar" is running so that
+/// newly arrived players (WAN) show up in the roster without a restart. Fires
+/// immediately when the search becomes ready, then every few seconds.
+pub fn update_discovery(
+    time: Res<Time>,
+    mut timer: ResMut<DiscoveryTimer>,
+    search: Res<AutoSearch>,
+    gateway: Res<GatewayState>,
+    channels: Res<NetChannels>,
+    mut was_ready: Local<bool>,
+) {
+    timer.0.tick(time.delta());
+
+    let peer = gateway.peer;
+    let ready = search.0 && gateway.connected && gateway.reserved && peer.is_some();
+    if !ready {
+        timer.0.reset();
+        *was_ready = false;
+        return;
+    }
+    let fire = !*was_ready || timer.0.just_finished();
+    *was_ready = true;
+    if fire {
+        let self_peer = peer.expect("ready implies gateway peer");
+        let _ = channels.commands.send(NetCommand::RendezvousDiscover {
+            peer: self_peer,
+            namespace: "/pong/all".to_string(),
+        });
     }
 }
 
@@ -425,6 +724,7 @@ pub fn on_game_request(
     local: Res<LocalPeerId>,
     mut is_host: ResMut<IsHost>,
     channels: Res<NetChannels>,
+    mut names: ResMut<PeerNames>,
     mut commands: Commands,
 ) {
     let NetEvent::GameRequest { peer, request } = ev.event() else {
@@ -432,11 +732,15 @@ pub fn on_game_request(
     };
 
     match request {
+        GameRequest::Hello { name } => {
+            if !name.is_empty() {
+                names.0.insert(*peer, name.clone());
+            }
+        }
         GameRequest::InviteToPlay => {
             info!("{peer} invited us to play");
             opponent.0 = Some(*peer);
             *intent = MatchIntent::Idle;
-            // Tell the challenger the match is on.
             let _ = channels.commands.send(NetCommand::SendRequest {
                 peer: *peer,
                 request: GameRequest::MatchStart,
@@ -450,14 +754,18 @@ pub fn on_game_request(
             start_match(*peer, &state, &mut next, &mut pending, &local, &mut is_host);
         }
         GameRequest::MigrateHost(snapshot) => {
-            // M4/M7: the host hands us authority. Take over the simulation
-            // from its final authoritative state without leaving Playing.
             info!("{peer} transferred host authority to us");
             opponent.0 = Some(*peer);
             *intent = MatchIntent::Idle;
             is_host.0 = true;
             if *state == AppState::Playing {
-                sim::start_seeded_match_sim(&mut commands, &is_host, &opponent, &channels, Some(*snapshot));
+                sim::start_seeded_match_sim(
+                    &mut commands,
+                    &is_host,
+                    &opponent,
+                    &channels,
+                    Some(*snapshot),
+                );
                 let _ = channels.commands.send(NetCommand::SendRequest {
                     peer: *peer,
                     request: GameRequest::HostMigrated,
@@ -473,6 +781,23 @@ pub fn on_game_request(
     }
 }
 
+/// Stops the automatic hunt and leaves the gateway queue when a match starts.
+pub fn on_enter_playing(
+    mut search: ResMut<AutoSearch>,
+    gateway: Res<GatewayState>,
+    channels: Res<NetChannels>,
+) {
+    search.0 = false;
+    if gateway.queued
+        && let Some(peer) = gateway.peer
+    {
+        let _ = channels.commands.send(NetCommand::SendGatewayRequest {
+            peer,
+            request: GatewayRequest::LeaveQueue,
+        });
+    }
+}
+
 /// Enters `Playing` now, or if a round is already running, queues a fresh start
 /// for the next frame (a Menu transition tears the old round down cleanly).
 fn start_match(
@@ -483,8 +808,6 @@ fn start_match(
     local: &LocalPeerId,
     is_host: &mut IsHost,
 ) {
-    // Deterministic choice so both sides agree on who simulates the ball and
-    // score: whichever peer id is smaller hosts.
     is_host.0 = match local.0 {
         Some(own) => own.to_bytes() < peer.to_bytes(),
         None => true,
@@ -500,7 +823,10 @@ fn start_match(
 }
 
 /// Finishes joining a match that was requested while we were playing.
-pub fn enter_pending_match(mut pending: ResMut<PendingMatch>, mut next: ResMut<NextState<AppState>>) {
+pub fn enter_pending_match(
+    mut pending: ResMut<PendingMatch>,
+    mut next: ResMut<NextState<AppState>>,
+) {
     if let Some(peer) = pending.0.take() {
         info!("Starting fresh match with {peer}");
         next.set(AppState::Playing);
@@ -537,8 +863,6 @@ pub fn leave_match(
         });
     }
     info!("Leaving the match");
-    // Opponent stays set on purpose: `history::record_match` runs on
-    // `OnExit(Playing)` and needs the rival + final score to persist.
     pending.0 = None;
     next.set(AppState::Menu);
 }
@@ -566,9 +890,6 @@ pub fn on_peer_disconnected(
         return;
     }
 
-    // M7: the host vanished → the guest becomes the host and resumes from the
-    // last authoritative snapshot. `seq` continues from the seed so promoted
-    // snapshots stay strictly increasing.
     if *state == AppState::Playing && !is_host.0 && sim.is_none() {
         info!("Opponent {peer} disconnected; migrating to host");
         is_host.0 = true;
@@ -580,8 +901,6 @@ pub fn on_peer_disconnected(
     info!("Opponent {peer} disconnected, back to menu");
     pending.0 = None;
     if *state == AppState::Playing {
-        // Opponent stays set so `history::record_match` (OnExit) persists the
-        // result of the interrupted match.
         next.set(AppState::Menu);
     } else {
         opponent.0 = None;
@@ -589,7 +908,9 @@ pub fn on_peer_disconnected(
     let _ = channels;
 }
 
-fn set_label(labels: &mut Query<(&mut Text, &MenuLabel)>, kind: MenuLabel, text: String) {
+// --- UI drivers ------------------------------------------------------------
+
+fn set_text(labels: &mut Query<(&mut Text, &TextLine)>, kind: TextLine, text: String) {
     for (mut label, node_kind) in labels.iter_mut() {
         if *node_kind == kind {
             label.0 = text.clone();
@@ -597,194 +918,501 @@ fn set_label(labels: &mut Query<(&mut Text, &MenuLabel)>, kind: MenuLabel, text:
     }
 }
 
-/// Drives the menu: handles button presses and keeps the player list fresh.
+/// Refreshes the menu text lines.
 #[allow(clippy::too_many_arguments)]
 pub fn update_menu(
-    mut commands: Commands,
-    peers: Res<Peers>,
     local: Res<LocalPeerId>,
-    mut gateway: ResMut<GatewayState>,
+    username: Res<Username>,
+    search: Res<AutoSearch>,
+    peers: Res<Peers>,
+    gateway: Res<GatewayState>,
+    matched: Res<GatewayMatch>,
     history: Res<MatchHistory>,
-    mut labels: Query<(&mut Text, &MenuLabel)>,
-    buttons: Query<(&Interaction, &MenuButton)>,
-    challenges: Query<(&Interaction, &ChallengeButton)>,
-    player_list: Single<Entity, With<PlayerList>>,
-    history_list: Single<Entity, With<HistoryList>>,
-    mut intent: ResMut<MatchIntent>,
-    mut list_state: ResMut<PlayerListState>,
-    mut render_state: ResMut<HistoryRender>,
-    channels: Res<NetChannels>,
+    mut labels: Query<(&mut Text, &TextLine)>,
 ) {
-    set_label(
+    set_text(
         &mut labels,
-        MenuLabel::You,
+        TextLine::You,
         match local.0 {
-            Some(id) => format!("You are {id}"),
-            None => "You are ...".to_string(),
+            Some(id) => format!("{}  ·  {}", username.0, short_peer(id)),
+            None => username.0.clone(),
         },
     );
 
-    set_label(
+    let visible = peers.0.iter().filter(|p| gateway.peer != Some(**p)).count();
+    set_text(
         &mut labels,
-        MenuLabel::Status,
-        match *intent {
-            MatchIntent::Hosting => "Hosting: waiting for an opponent to pick you...".to_string(),
-            MatchIntent::Idle if peers.0.is_empty() => {
-                "No players found yet. Start a second instance on this network or join the WAN queue."
-                    .to_string()
+        TextLine::Status,
+        if search.0 {
+            if visible == 0 {
+                "Buscando rivales en LAN y WAN…".to_string()
+            } else {
+                format!(
+                    "Buscando… {visible} jugador{} en el área.",
+                    if visible == 1 { "" } else { "es" }
+                )
             }
-            MatchIntent::Idle => "Pick an opponent below to start a match.".to_string(),
+        } else {
+            "Listo. Pulsa Jugar para buscar rivales (LAN + WAN).".to_string()
         },
     );
 
-    set_label(
+    set_text(
         &mut labels,
-        MenuLabel::Gateway,
-        match (gateway.connected, gateway.reserved, gateway.queued) {
-            (false, _, _) => "Gateway: not connected".to_string(),
-            (true, false, _) => "Gateway: connected, reserving relay...".to_string(),
-            (true, true, false) => "Gateway: connected. Ready — join the queue.".to_string(),
-            (true, true, true) => {
-                "Gateway: in matchmaking queue. Waiting for a rival...".to_string()
-            }
-        },
+        TextLine::Gateway,
+        gateway_line(&gateway, &matched),
     );
 
-    // --- Buttons ---------------------------------------------------------
-    for (interaction, button) in &buttons {
+    let (wins, losses, draws) = history.wins_losses();
+    set_text(
+        &mut labels,
+        TextLine::Record,
+        if wins + losses + draws == 0 {
+            String::new()
+        } else {
+            format!("Récord: {wins}V / {losses}D / {draws}E")
+        },
+    );
+}
+
+fn gateway_line(gateway: &GatewayState, matched: &GatewayMatch) -> String {
+    if let Some(peer) = matched.0 {
+        return format!("¡Emparejado! Conectando con {}", short_peer(peer));
+    }
+    match (gateway.connected, gateway.reserved, gateway.queued) {
+        (false, _, _) => "Gateway: no conectado".to_string(),
+        (true, false, _) => "Gateway: conectado, reservando relay…".to_string(),
+        (true, true, false) => match &gateway.rank {
+            Some(rank) => format!("Gateway: listo · rango {rank}"),
+            None => "Gateway: listo".to_string(),
+        },
+        (true, true, true) => match &gateway.rank {
+            Some(rank) => format!("Gateway: en cola · rango {rank}"),
+            None => "Gateway: buscando rival…".to_string(),
+        },
+    }
+}
+
+/// Handles the main menu buttons (hover feedback + presses).
+#[allow(clippy::too_many_arguments)]
+pub fn update_buttons(
+    mut buttons: Query<(&Interaction, &MenuButton, &Children, &mut BackgroundColor)>,
+    mut button_texts: Query<&mut TextColor, (With<ButtonText>, Without<MenuButton>)>,
+    mut search: ResMut<AutoSearch>,
+    mut gateway: ResMut<GatewayState>,
+    peers: Res<Peers>,
+    username: Res<Username>,
+    channels: Res<NetChannels>,
+    mut options_open: ResMut<OptionsOpen>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    for (interaction, action, children, mut bg) in &mut buttons {
+        let hovered = *interaction == Interaction::Hovered;
+        bg.0 = if hovered { Color::WHITE } else { Color::NONE };
+        for child in children {
+            if let Ok(mut tc) = button_texts.get_mut(*child) {
+                tc.0 = if hovered { Color::BLACK } else { Color::WHITE };
+            }
+        }
         if *interaction != Interaction::Pressed {
             continue;
         }
-        match button {
-            MenuButton::Host => {
-                *intent = MatchIntent::Hosting;
-                info!("Hosting a match");
-            }
-            MenuButton::ConnectGateway => {
-                let addr: Multiaddr = std::env::var("PONG_GATEWAY")
-                    .unwrap_or_else(|_| GATEWAY_DEFAULT_ADDR.to_string())
-                    .parse()
-                    .unwrap_or_else(|e| {
-                        warn!("Bad PONG_GATEWAY address: {e}");
-                        GATEWAY_DEFAULT_ADDR
-                            .to_string()
-                            .parse()
-                            .expect("default address is valid")
-                    });
-                info!("Connecting to gateway at {addr}");
-                *gateway = GatewayState {
-                    addr: Some(addr.clone()),
-                    connected: false,
-                    reserved: false,
-                    queued: false,
-                    peer: None,
-                    rank: None,
-                    rating: 0,
-                };
-                let _ = channels.commands.send(NetCommand::Dial(addr));
-            }
-            MenuButton::JoinQueue => {
-                if let Some(peer) = gateway.peer
-                    && gateway.reserved
-                {
-                    info!("Joining gateway matchmaking queue");
-                    let _ = channels.commands.send(NetCommand::SendGatewayRequest {
-                        peer,
-                        request: GatewayRequest::QueueMatch,
-                    });
+        match action {
+            MenuButton::Play => {
+                if search.0 {
+                    search.0 = false;
+                    if gateway.queued
+                        && let Some(peer) = gateway.peer
+                    {
+                        let _ = channels.commands.send(NetCommand::SendGatewayRequest {
+                            peer,
+                            request: GatewayRequest::LeaveQueue,
+                        });
+                    }
+                    info!("Search stopped");
+                } else {
+                    search.0 = true;
+                    start_search(&mut gateway, &channels, &username, &peers);
+                    info!("Searching for opponents (LAN + WAN)");
                 }
             }
-            MenuButton::LeaveQueue => {
-                if let Some(peer) = gateway.peer {
-                    info!("Leaving gateway matchmaking queue");
-                    let _ = channels.commands.send(NetCommand::SendGatewayRequest {
-                        peer,
-                        request: GatewayRequest::LeaveQueue,
-                    });
-                }
+            MenuButton::Options => {
+                options_open.0 = true;
+            }
+            MenuButton::Quit => {
+                info!("Quitting");
+                exit.write(AppExit::Success);
             }
         }
     }
+}
 
-    for (interaction, button) in &challenges {
+fn start_search(
+    gateway: &mut GatewayState,
+    channels: &NetChannels,
+    username: &Username,
+    peers: &Peers,
+) {
+    let gw_addr =
+        std::env::var("PONG_GATEWAY").unwrap_or_else(|_| GATEWAY_DEFAULT_ADDR.to_string());
+    let addr: Multiaddr = gw_addr.parse().unwrap_or_else(|e| {
+        warn!("Bad PONG_GATEWAY address: {e}");
+        GATEWAY_DEFAULT_ADDR
+            .parse()
+            .expect("default address is valid")
+    });
+
+    match (gateway.peer, gateway.connected, gateway.reserved) {
+        (None, _, _) => {
+            *gateway = GatewayState {
+                addr: Some(addr),
+                connected: false,
+                reserved: false,
+                queued: false,
+                peer: None,
+                rank: None,
+                rating: 0,
+            };
+            if let Some(target) = gateway.addr.clone() {
+                let _ = channels.commands.send(NetCommand::Dial(target));
+            }
+        }
+        (Some(peer), true, true) => {
+            let _ = channels.commands.send(NetCommand::SendGatewayRequest {
+                peer,
+                request: GatewayRequest::Register {
+                    username: username.0.clone(),
+                },
+            });
+        }
+        (Some(peer), true, false) => {
+            if let Some(mut base) = gateway.base_addr() {
+                base.push(Protocol::P2p(peer));
+                base.push(Protocol::P2pCircuit);
+                let _ = channels.commands.send(NetCommand::Listen(base));
+            }
+        }
+        _ => {}
+    }
+
+    for peer in &peers.0 {
+        if gateway.peer == Some(*peer) {
+            continue;
+        }
+        let _ = channels.commands.send(NetCommand::SendRequest {
+            peer: *peer,
+            request: GameRequest::InviteToPlay,
+        });
+    }
+}
+
+/// Options overlay: save the username, or go back.
+#[allow(clippy::too_many_arguments)]
+pub fn update_options(
+    mut root: Single<&mut Node, With<OptionsRoot>>,
+    input: Single<&mut EditableText, With<OptionsInput>>,
+    mut buttons: Query<(
+        &Interaction,
+        &OptionsButton,
+        &Children,
+        &mut BackgroundColor,
+    )>,
+    mut button_texts: Query<&mut TextColor, (With<ButtonText>, Without<OptionsButton>)>,
+    mut username: ResMut<Username>,
+    history: Res<MatchHistory>,
+    search: Res<AutoSearch>,
+    gateway: Res<GatewayState>,
+    channels: Res<NetChannels>,
+    mut options_open: ResMut<OptionsOpen>,
+) {
+    if !options_open.0 {
+        root.display = Display::None;
+        return;
+    }
+    root.display = Display::Flex;
+
+    for (interaction, kind, children, mut bg) in &mut buttons {
+        let hovered = *interaction == Interaction::Hovered;
+        if *kind == OptionsButton::Save && hovered {
+            bg.0 = Color::srgb(0.85, 0.85, 0.9);
+        } else if *kind == OptionsButton::Back && hovered {
+            bg.0 = Color::srgb(0.3, 0.3, 0.32);
+        } else if *kind == OptionsButton::Save {
+            bg.0 = Color::WHITE;
+        } else {
+            bg.0 = Color::NONE;
+        }
+        for child in children {
+            if let Ok(mut tc) = button_texts.get_mut(*child) {
+                tc.0 = if *kind == OptionsButton::Save && !hovered {
+                    Color::BLACK
+                } else {
+                    Color::WHITE
+                };
+            }
+        }
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match kind {
+            OptionsButton::Save => {
+                let name = input.value().to_string().trim().to_string();
+                if !name.is_empty() && username.0 != name {
+                    username.0 = name.clone();
+                    history.save_username(&name);
+                    if search.0
+                        && let Some(peer) = gateway.peer
+                    {
+                        let _ = channels.commands.send(NetCommand::SendGatewayRequest {
+                            peer,
+                            request: GatewayRequest::Register { username: name },
+                        });
+                    }
+                }
+                options_open.0 = false;
+            }
+            OptionsButton::Back => {
+                options_open.0 = false;
+            }
+        }
+    }
+}
+
+/// First-run onboarding: asks for the player name, persists it and closes.
+#[allow(clippy::too_many_arguments)]
+pub fn update_onboarding(
+    mut root: Single<&mut Node, With<OnboardingRoot>>,
+    input: Single<&mut EditableText, With<OnboardingInput>>,
+    button: Query<(&Interaction, &Children), With<OnboardingButton>>,
+    mut button_texts: Query<&mut TextColor, (With<ButtonText>, Without<OnboardingButton>)>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut username: ResMut<Username>,
+    history: Res<MatchHistory>,
+    search: Res<AutoSearch>,
+    gateway: Res<GatewayState>,
+    channels: Res<NetChannels>,
+    mut onboarding: ResMut<NeedsOnboarding>,
+) {
+    root.display = if onboarding.0 { Display::Flex } else { Display::None };
+    if !onboarding.0 {
+        return;
+    }
+
+    let mut submit = keyboard.just_pressed(KeyCode::Enter);
+    for (interaction, children) in &button {
+        let hovered = *interaction == Interaction::Hovered;
+        for child in children {
+            if let Ok(mut tc) = button_texts.get_mut(*child) {
+                tc.0 = if hovered {
+                    Color::srgb(0.85, 0.85, 0.9)
+                } else {
+                    Color::BLACK
+                };
+            }
+        }
         if *interaction == Interaction::Pressed {
-            info!("Challenging {}", button.0);
-            *intent = MatchIntent::Idle;
-            let _ = channels.commands.send(NetCommand::SendRequest {
-                peer: button.0,
-                request: GameRequest::InviteToPlay,
+            submit = true;
+        }
+    }
+    if !submit {
+        return;
+    }
+
+    let name = input.value().to_string().trim().to_string();
+    if name.is_empty() {
+        return;
+    }
+    if username.0 != name {
+        username.0 = name.clone();
+        history.save_username(&name);
+        if search.0
+            && let Some(peer) = gateway.peer
+        {
+            let _ = channels.commands.send(NetCommand::SendGatewayRequest {
+                peer,
+                request: GatewayRequest::Register { username: name },
             });
         }
     }
-
-    // --- Rebuild the opponent list whenever the peer set changes ----------
-    if list_state.0 != peers.0 {
-        rebuild_player_list(&mut commands, &player_list, &peers);
-        list_state.0 = peers.0.clone();
-    }
-
-    // --- Rebuild the history panel when a new match was recorded ----------
-    if render_state.rev != history.rev {
-        render_state.rev = history.rev;
-        rebuild_history(&mut commands, &history_list, &history);
-    }
+    onboarding.0 = false;
 }
 
-fn rebuild_player_list(commands: &mut Commands, list_entity: &Entity, peers: &Peers) {
-    commands.entity(*list_entity).despawn_children();
-    commands.entity(*list_entity).with_children(|parent| {
-        for peer in &peers.0 {
-            parent.spawn((
-                ChallengeButton(*peer),
-                Button,
-                Node {
-                    min_width: px(200.),
-                    padding: UiRect::axes(px(16.), px(6.)),
-                    border: UiRect::all(px(2.)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgb(0.2, 0.2, 0.25)),
-                BorderColor::all(DIM),
-                children![(
-                    Text::new(format!("Play vs {}", short_peer(*peer))),
-                    TextFont::from_font_size(20.0),
-                    TextColor(Color::WHITE),
-                )],
-            ));
-        }
-    });
+// --- Player network --------------------------------------------------------
+
+fn peer_hash(peer: PeerId) -> u32 {
+    peer.to_bytes()
+        .into_iter()
+        .fold(2166136261u32, |acc, b| (acc ^ b as u32).wrapping_mul(16777619))
 }
 
-fn rebuild_history(commands: &mut Commands, list_entity: &Entity, history: &MatchHistory) {
-    commands.entity(*list_entity).despawn_children();
-    commands.entity(*list_entity).with_children(|parent| {
-        if history.records.is_empty() {
-            parent.spawn((
-                Text::new("No matches played yet."),
-                TextFont::from_font_size(16.0),
-                TextColor(DIM),
-            ));
-            return;
+fn initial_angle(peer: PeerId) -> f32 {
+    (peer_hash(peer) % 628) as f32 / 100.0
+}
+
+/// Each player orbits at its own (deterministic, stable) angular speed so the
+/// cloud of bubbles swirls around the hub instead of rotating rigidly.
+fn orbit_speed(peer: PeerId) -> f32 {
+    ORBIT_SPEED
+        * (ORBIT_SPEED_MIN
+            + (peer_hash(peer) % 100) as f32 / 100.0 * (ORBIT_SPEED_MAX - ORBIT_SPEED_MIN))
+}
+
+fn spawn_node(commands: &mut Commands, assets: &GraphAssets, peer: PeerId, angle: f32) {
+    let dir = Vec2::from_angle(angle);
+    commands.spawn((
+        NodeOf(peer),
+        NodeBubble,
+        Mesh2d(assets.dot.clone()),
+        MeshMaterial2d(assets.material.clone()),
+        Transform::from_translation((ORBIT_CENTER + dir * ORBIT_RADIUS).extend(0.0)),
+    ));
+    commands.spawn((
+        NodeOf(peer),
+        NodeLink,
+        Mesh2d(assets.line.clone()),
+        MeshMaterial2d(assets.material.clone()),
+        Transform::from_translation((ORBIT_CENTER + dir * (ORBIT_RADIUS / 2.0)).extend(0.0))
+            .with_rotation(Quat::from_rotation_z(angle))
+            .with_scale(Vec3::new(ORBIT_RADIUS, 2.0, 1.0)),
+    ));
+    commands.spawn((
+        NodeOf(peer),
+        NodeLabel,
+        Text2d::new(short_peer(peer)),
+        TextFont::from_font_size(NODE_FONT),
+        TextColor(Color::WHITE),
+        Transform::from_translation(
+            (ORBIT_CENTER + dir * ORBIT_RADIUS + NODE_LABEL_OFFSET).extend(0.0),
+        ),
+    ));
+}
+
+/// Reconciles the player network with the current roster and keeps it orbiting.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+pub fn update_node_graph(
+    time: Res<Time>,
+    search: Res<AutoSearch>,
+    username: Res<Username>,
+    peers: Res<Peers>,
+    gateway: Res<GatewayState>,
+    names: Res<PeerNames>,
+    assets: Res<GraphAssets>,
+    mut orbit: ResMut<OrbitState>,
+    mut commands: Commands,
+    all_nodes: Query<(Entity, &NodeOf)>,
+    mut hub_vis: Single<&mut Visibility, (With<NodeHub>, Without<NodeHubLabel>)>,
+    mut hub_tf: Single<&mut Transform, With<NodeHub>>,
+    mut labels: Query<
+        (&NodeOf, &mut Transform, &mut Text2d),
+        (With<NodeLabel>, Without<NodeHubLabel>, Without<NodeHub>),
+    >,
+    mut bubbles: Query<
+        (&NodeOf, &mut Transform),
+        (
+            With<NodeBubble>,
+            Without<NodeLink>,
+            Without<NodeLabel>,
+            Without<NodeHub>,
+        ),
+    >,
+    mut links: Query<
+        (&NodeOf, &mut Transform),
+        (
+            With<NodeLink>,
+            Without<NodeBubble>,
+            Without<NodeLabel>,
+            Without<NodeHub>,
+        ),
+    >,
+    mut hub_label_vis: Single<
+        (&mut Visibility, &mut Text2d),
+        (With<NodeHubLabel>, Without<NodeHub>),
+    >,
+) {
+    if username.is_changed() {
+        hub_label_vis.1.0 = username.0.clone();
+    }
+
+    // The player network only appears while hunting for a match ("Jugar"):
+    // it shows the players that are connected right now. Otherwise the field
+    // stays clean.
+    if !search.0 {
+        for (entity, _) in &all_nodes {
+            commands.entity(entity).despawn();
         }
-        let (wins, losses, draws) = history.wins_losses();
-        parent.spawn((
-            Text::new(format!("Record: {wins}W / {losses}L / {draws}D")),
-            TextFont::from_font_size(18.0),
-            TextColor(Color::WHITE),
-        ));
-        for rec in &history.records {
-            let winner = if rec.my_score > rec.opp_score { "W" } else { "L" };
-            parent.spawn((
-                Text::new(format!(
-                    "{winner}  {}-{}  vs {}  ({})",
-                    rec.my_score,
-                    rec.opp_score,
-                    rec.rival,
-                    if rec.was_host { "host" } else { "guest" },
-                )),
-                TextFont::from_font_size(14.0),
-                TextColor(DIM),
-            ));
+        hub_vis.set_if_neq(Visibility::Hidden);
+        hub_label_vis.0.set_if_neq(Visibility::Hidden);
+        return;
+    }
+    hub_vis.set_if_neq(Visibility::Visible);
+    hub_label_vis.0.set_if_neq(Visibility::Visible);
+
+    // The hub breathes: a slow, gentle scale oscillation.
+    let now = time.elapsed_secs();
+    hub_tf.scale = Vec3::splat((1.0 + HUB_PULSE_AMOUNT * (now * 2.5).sin()).max(0.5));
+
+    let desired: Vec<PeerId> = peers
+        .0
+        .iter()
+        .copied()
+        .filter(|p| gateway.peer != Some(*p))
+        .take(MAX_NODES)
+        .collect();
+
+    let mut have: Vec<PeerId> = labels.iter().map(|(node, _, _)| node.0).collect();
+
+    for (entity, node) in &all_nodes {
+        if !desired.contains(&node.0) {
+            commands.entity(entity).despawn();
         }
-    });
+    }
+    have.retain(|p| desired.contains(p));
+
+    let mut spawned: Vec<(PeerId, f32)> = Vec::new();
+    for peer in &desired {
+        if !have.contains(peer) {
+            let angle = initial_angle(*peer);
+            spawn_node(&mut commands, &assets, *peer, angle);
+            spawned.push((*peer, angle));
+        }
+    }
+    for (peer, angle) in spawned {
+        orbit.0.insert(peer, angle);
+    }
+
+    let dt = time.delta_secs().min(0.1);
+    for (node, mut tf) in &mut bubbles {
+        if let Some(angle) = orbit.0.get_mut(&node.0) {
+            *angle += dt * orbit_speed(node.0);
+            let dir = Vec2::from_angle(*angle);
+            tf.translation = (ORBIT_CENTER + dir * ORBIT_RADIUS).extend(0.0);
+            // Each bubble breathes at its own phase while it orbits.
+            let phase = (peer_hash(node.0) % 100) as f32;
+            let pulse = 1.0 + BUBBLE_PULSE_AMOUNT * ((now * ORBIT_ANIM_BASE + phase) / 100.0).sin();
+            tf.scale = Vec3::splat(pulse.max(0.5));
+        }
+    }
+    for (node, mut tf) in &mut links {
+        if let Some(angle) = orbit.0.get(&node.0) {
+            let dir = Vec2::from_angle(*angle);
+            tf.translation = (ORBIT_CENTER + dir * (ORBIT_RADIUS / 2.0)).extend(0.0);
+            tf.rotation = Quat::from_rotation_z(*angle);
+            tf.scale = Vec3::new(ORBIT_RADIUS, 2.0, 1.0);
+        }
+    }
+    for (node, mut tf, mut txt) in &mut labels {
+        if let Some(angle) = orbit.0.get(&node.0) {
+            let dir = Vec2::from_angle(*angle);
+            tf.translation = (ORBIT_CENTER + dir * ORBIT_RADIUS + NODE_LABEL_OFFSET).extend(0.0);
+            let name = names
+                .0
+                .get(&node.0)
+                .cloned()
+                .unwrap_or_else(|| short_peer(node.0));
+            if txt.0 != name {
+                txt.0 = name;
+            }
+        }
+    }
 }

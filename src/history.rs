@@ -7,12 +7,12 @@
 use std::sync::Mutex;
 
 use bevy::prelude::*;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
-use crate::menu::Opponent;
-use crate::networking::{short_peer, GatewayState, NetChannels, NetCommand};
-use crate::networking_demo::{IsHost, RemoteWorld};
 use crate::Score;
+use crate::menu::Opponent;
+use crate::networking::{GatewayState, NetChannels, NetCommand, short_peer};
+use crate::networking_demo::{IsHost, RemoteWorld};
 use ponged::protocol::GatewayRequest;
 
 /// How many past matches the ranking panel shows.
@@ -26,15 +26,18 @@ pub struct MatchRecord {
     /// Local timestamp of when the match finished.
     #[allow(dead_code)]
     pub happened_at: String,
+    #[allow(dead_code)]
     pub rival: String,
     pub my_score: i32,
     pub opp_score: i32,
+    #[allow(dead_code)]
     pub was_host: bool,
 }
 
 /// Connection + cached ranking. Wrapped in a `Mutex` because `rusqlite`'s
 /// `Connection` is not `Sync`.
 #[derive(Resource)]
+#[derive(Default)]
 pub struct MatchHistory {
     db: Option<Mutex<Connection>>,
     /// Most recent matches, newest first.
@@ -45,19 +48,9 @@ pub struct MatchHistory {
     armed: bool,
 }
 
-impl Default for MatchHistory {
-    fn default() -> Self {
-        MatchHistory {
-            db: None,
-            records: Vec::new(),
-            rev: 0,
-            armed: false,
-        }
-    }
-}
 
 impl MatchHistory {
-    fn ensure_open(&mut self) {
+    pub fn ensure_open(&mut self) {
         if self.db.is_some() {
             return;
         }
@@ -74,6 +67,10 @@ impl MatchHistory {
                     my_score    INTEGER NOT NULL,
                     opp_score   INTEGER NOT NULL,
                     was_host    INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
                 );",
             )
             .is_ok()
@@ -128,6 +125,34 @@ impl MatchHistory {
                 (w, l, d + 1)
             }
         })
+    }
+
+    /// Reads the stored display name, if any.
+    pub fn load_username(&self) -> Option<String> {
+        let db = self.db.as_ref()?;
+        let conn = db.lock().ok()?;
+        let mut stmt = conn
+            .prepare("SELECT value FROM settings WHERE key = 'username'")
+            .ok()?;
+        let mut rows = stmt.query_map([], |row| row.get(0)).ok()?;
+        rows.next().and_then(Result::ok)
+    }
+
+    /// Persists the display name.
+    pub fn save_username(&self, name: &str) {
+        let Some(db) = &self.db else {
+            return;
+        };
+        let Ok(conn) = db.lock() else {
+            return;
+        };
+        if let Err(e) = conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('username', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [name],
+        ) {
+            warn!("Could not save username: {e}");
+        }
     }
 }
 

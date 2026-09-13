@@ -462,22 +462,47 @@ fn main() {
         .init_resource::<networking_demo::IsHost>()
         .init_resource::<networking_demo::SnapshotSeq>()
         .init_resource::<networking::GatewayState>()
+        .init_resource::<menu::Username>()
         .init_resource::<menu::LocalPeerId>()
         .init_resource::<menu::Opponent>()
         .init_resource::<menu::PendingMatch>()
         .init_resource::<menu::MatchIntent>()
-        .init_resource::<menu::PlayerListState>()
         .init_resource::<menu::GatewayMatch>()
-        .init_resource::<menu::HistoryRender>()
+        .init_resource::<menu::AutoSearch>()
+        .init_resource::<menu::PeerNames>()
+        .init_resource::<menu::OptionsOpen>()
+        .init_resource::<menu::NeedsOnboarding>()
+        .init_resource::<menu::DiscoveryTimer>()
+        .init_resource::<menu::OrbitState>()
         .init_resource::<history::MatchHistory>()
         .init_resource::<sim::MatchOver>()
-        .add_systems(Startup, (spawn_camera, networking_demo::setup))
+        .add_systems(
+            Startup,
+            (menu::load_settings, menu::install_default_font, spawn_camera, networking_demo::setup),
+        )
         .add_systems(OnEnter(AppState::Menu), menu::spawn_menu)
         .add_systems(OnEnter(AppState::Menu), history::refresh_on_menu)
         .add_systems(OnExit(AppState::Menu), menu::despawn_menu)
+        .add_systems(Update, menu::update_menu.run_if(in_state(AppState::Menu)))
         .add_systems(
             Update,
-            menu::update_menu.run_if(in_state(AppState::Menu)),
+            menu::update_buttons.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
+            menu::update_options.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
+            menu::update_onboarding.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
+            menu::update_node_graph.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
+            menu::update_discovery.run_if(in_state(AppState::Menu)),
         )
         .add_systems(
             Update,
@@ -499,6 +524,7 @@ fn main() {
                 reset_match_over,
                 sim::start_match_sim.run_if(resource_equals(networking_demo::IsHost(true))),
                 history::arm_record,
+                menu::on_enter_playing,
             ),
         )
         .add_systems(
@@ -619,22 +645,38 @@ mod networking_demo {
         ev: On<NetEvent>,
         mut peers: ResMut<Peers>,
         mut gateway_match: ResMut<crate::menu::GatewayMatch>,
+        gateway: Res<crate::networking::GatewayState>,
+        username: Res<crate::menu::Username>,
+        search: Res<crate::menu::AutoSearch>,
         channels: Res<NetChannels>,
     ) {
         if let NetEvent::PeerConnected(peer) = ev.event() {
+            let is_matched = gateway_match.0 == Some(*peer);
             if !peers.0.contains(peer) {
                 peers.0.push(*peer);
                 info!("Peer {peer} connected, saying hello");
                 let _ = channels.commands.send(NetCommand::SendRequest {
                     peer: *peer,
-                    request: Request::Hello,
+                    request: Request::Hello {
+                        name: username.0.clone(),
+                    },
                 });
             }
             // M6: the opponent the gateway matched us with connected — kick the
             // same invite/accept handshake used on LAN.
-            if gateway_match.0 == Some(*peer) {
+            if is_matched {
                 gateway_match.0 = None;
                 info!("Gateway-matched opponent {peer} connected; challenging");
+                let _ = channels.commands.send(NetCommand::SendRequest {
+                    peer: *peer,
+                    request: Request::InviteToPlay,
+                });
+            }
+            // Auto-search (M5 "Jugar"): challenge any fresh LAN peer, but never
+            // the gateway itself or the just-consumed gateway match.
+            let is_gateway = gateway.peer == Some(*peer);
+            if search.0 && !is_gateway && !is_matched {
+                info!("Challenging discovered peer {peer}");
                 let _ = channels.commands.send(NetCommand::SendRequest {
                     peer: *peer,
                     request: Request::InviteToPlay,
@@ -653,9 +695,8 @@ mod networking_demo {
     pub fn on_game_request(ev: On<NetEvent>, mut latest: ResMut<LatestSnapshot>) {
         if let NetEvent::GameRequest { peer, request } = ev.event() {
             match request {
-                Request::Hello => info!("Greeting received from {peer}"),
+                Request::Hello { name } => info!("Greeting received from {peer}: {name}"),
                 Request::State(snapshot) => latest.0 = Some(*snapshot),
-                Request::Paddle { y } => debug!("Paddle y={y} received from {peer}"),
                 Request::InviteToPlay | Request::MatchStart => {
                     // Handled by `menu::on_game_request`.
                 }

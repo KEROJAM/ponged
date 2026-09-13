@@ -3,18 +3,18 @@ use std::time::Duration;
 use bevy::prelude::*;
 use libp2p::futures::StreamExt;
 use libp2p::kad::store::MemoryStore;
-use libp2p::request_response::{self, cbor, ProtocolSupport};
+use libp2p::request_response::{self, ProtocolSupport, cbor};
 use libp2p::{
-    dcutr, identify, kad, mdns, noise, ping, relay, rendezvous, swarm::NetworkBehaviour,
-    swarm::SwarmEvent, tcp, yamux, Multiaddr, PeerId, StreamProtocol, SwarmBuilder,
+    Multiaddr, PeerId, StreamProtocol, SwarmBuilder, dcutr, identify, kad, mdns, noise, ping,
+    relay, rendezvous, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux,
 };
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::protocol::{
-    GatewayRequest, GatewayResponse, Request as GameRequest, Response as GameResponse,
-    GATEWAY_AGENT_VERSION, GATEWAY_PROTOCOL,
+    GATEWAY_AGENT_VERSION, GATEWAY_PROTOCOL, GatewayRequest, GatewayResponse,
+    Request as GameRequest, Response as GameResponse,
 };
-use crate::sim::{remote_paddle_sink, SimCommand};
+use crate::sim::{SimCommand, remote_paddle_sink};
 
 /// The libp2p protocol id used for game requests/responses.
 const GAME_PROTOCOL: StreamProtocol = StreamProtocol::new("/pong/state/1.0.0");
@@ -30,12 +30,28 @@ pub enum NetCommand {
     Dial(Multiaddr),
     Listen(Multiaddr),
     /// Fire a game request at a specific peer via the request-response protocol.
-    SendRequest { peer: PeerId, request: GameRequest },
+    SendRequest {
+        peer: PeerId,
+        request: GameRequest,
+    },
     /// Fire a gateway (matchmaking) request at a specific peer.
-    SendGatewayRequest { peer: PeerId, request: GatewayRequest },
+    SendGatewayRequest {
+        peer: PeerId,
+        request: GatewayRequest,
+    },
     /// Register ourselves on the rendezvous server so other clients can
     /// discover us (M3 publish).
-    RendezvousRegister { peer: PeerId, namespace: String },
+    RendezvousRegister {
+        peer: PeerId,
+        namespace: String,
+    },
+    /// Ask the rendezvous server who else is currently registered in a
+    /// namespace (M3 discover). Sent periodically while searching so available
+    /// players show up in real time.
+    RendezvousDiscover {
+        peer: PeerId,
+        namespace: String,
+    },
 }
 
 /// Events emitted by the network thread into the Bevy world. Trigger them and
@@ -49,25 +65,48 @@ pub enum NetEvent {
     Listening(Multiaddr),
     PeerConnected(PeerId),
     PeerDisconnected(PeerId),
-    PeerPinged { peer: PeerId, rtt: Duration },
+    PeerPinged {
+        peer: PeerId,
+        rtt: Duration,
+    },
     /// Another node identified itself over the `identify` protocol.
-    Identity { peer: PeerId, agent: String },
+    Identity {
+        peer: PeerId,
+        agent: String,
+    },
     /// An inbound game request arrived (a response was already sent).
-    GameRequest { peer: PeerId, request: GameRequest },
+    GameRequest {
+        peer: PeerId,
+        request: GameRequest,
+    },
     /// A reply to a game request we sent.
-    GameResponse { peer: PeerId, response: GameResponse },
+    GameResponse {
+        peer: PeerId,
+        response: GameResponse,
+    },
     /// A reply to a gateway (matchmaking) request we sent.
-    GatewayResponse { peer: PeerId, response: GatewayResponse },
+    GatewayResponse {
+        peer: PeerId,
+        response: GatewayResponse,
+    },
     /// An inbound gateway request (normally never sent by the server to us).
-    GatewayRequest { peer: PeerId, request: GatewayRequest },
+    GatewayRequest {
+        peer: PeerId,
+        request: GatewayRequest,
+    },
     /// Our relay reservation on a relay server (the gateway) succeeded.
-    RelayReservation { relay_peer: PeerId, success: bool },
+    RelayReservation {
+        relay_peer: PeerId,
+        success: bool,
+    },
     /// The rendezvous server reported peers registered in our namespace.
     RendezvousDiscovered {
         peers: Vec<(PeerId, Vec<Multiaddr>)>,
     },
     /// A direct (hole-punched) connection was established with `peer`.
-    DcutrEstablished { peer: PeerId },
+    DcutrEstablished {
+        peer: PeerId,
+    },
     Error(String),
 }
 
@@ -126,7 +165,10 @@ impl GatewayState {
     pub fn base_addr(&self) -> Option<Multiaddr> {
         let addr = self.addr.clone()?;
         let mut protocols = addr.into_iter().collect::<Vec<_>>();
-        if matches!(protocols.last(), Some(libp2p::core::multiaddr::Protocol::P2p(_))) {
+        if matches!(
+            protocols.last(),
+            Some(libp2p::core::multiaddr::Protocol::P2p(_))
+        ) {
             protocols.pop();
         }
         Some(protocols.into_iter().collect())
@@ -148,7 +190,8 @@ pub struct NetworkingPlugin;
 
 impl Plugin for NetworkingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup).add_systems(Update, poll_net_events);
+        app.add_systems(Startup, setup)
+            .add_systems(Update, poll_net_events);
     }
 }
 
@@ -191,13 +234,19 @@ async fn run_swarm(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
         // Add the relay client transport so we can dial /p2p-circuit addresses
         // (M3). `with_relay_client` hands the matching `relay::client::Behaviour`
         // to the `with_behaviour` closure below.
         .with_relay_client(noise::Config::new, yamux::Config::default)?
         .with_behaviour(
-            |keypair, relay_client| -> Result<Behaviour, Box<dyn std::error::Error + Send + Sync>> {
+            |keypair,
+             relay_client|
+             -> Result<Behaviour, Box<dyn std::error::Error + Send + Sync>> {
                 let peer_id = keypair.public().to_peer_id();
                 Ok(Behaviour {
                     ping: ping::Behaviour::default(),
@@ -264,6 +313,16 @@ async fn run_swarm(
                         Ok(_) => info!("Rendezvous registration sent to {peer}"),
                         Err(e) => warn!("Rendezvous registration failed: {e:?}"),
                     }
+                }
+                NetCommand::RendezvousDiscover { peer, namespace } => {
+                    let ns = match libp2p::rendezvous::Namespace::new(namespace) {
+                        Ok(ns) => ns,
+                        Err(e) => {
+                            warn!("Bad rendezvous namespace: {e:?}");
+                            continue;
+                        }
+                    };
+                    swarm.behaviour_mut().rendezvous.discover(Some(ns), None, None, peer);
                 }
             },
             Some(event) = swarm.next() => match event {
@@ -399,11 +458,8 @@ async fn run_swarm(
                         }
                         event => info!("Rendezvous event: {event:?}"),
                     },
-                    BehaviourEvent::Kademlia(event) => match event {
-                        kad::Event::OutboundQueryProgressed { result, .. } => {
-                            info!("Kademlia query progress: {result:?}");
-                        }
-                        _ => {}
+                    BehaviourEvent::Kademlia(event) => if let kad::Event::OutboundQueryProgressed { result, .. } = event {
+                        info!("Kademlia query progress: {result:?}");
                     },
                     BehaviourEvent::Relay(event) => match event {
                         relay::client::Event::ReservationReqAccepted { relay_peer_id, .. } => {
