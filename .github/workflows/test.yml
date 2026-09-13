@@ -1,0 +1,26 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Obtener codigo
+        uses: actions/checkout@v4
+
+      # Linux: el devShell de Nix trae todas las dependencias del sistema
+      # (wayland, udev, cantor rendering de Bevy) que necesita `cargo test`
+      # para compilar el binario del cliente.
+      - name: Instalar Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Correr tests
+        run: nix develop -c cargo test

@@ -70,6 +70,48 @@
       };
     };
 
+    # ── systemd unit (works en CUALQUIER distro con systemd) ────────
+    # Genera /etc/systemd/system/pong-gateway.service a partir del
+    # binario estatico. La IP publica se lee de /etc/pong-gateway.env
+    # (PONG_PUBLIC=...), asi no hay que regenerar nada si cambia la EIP.
+    packages."x86_64-linux".systemdUnit = pkgs.runCommand "pong-gateway-systemd-unit" {} ''
+      mkdir -p $out
+      cat > $out/pong-gateway.service <<'EOF'
+      [Unit]
+      Description=Pong P2P Matchmaking Gateway
+      After=network.target
+
+      [Service]
+      EnvironmentFile=/etc/pong-gateway.env
+      ExecStart=/usr/local/bin/pong-gateway --listen /ip4/0.0.0.0/tcp/4001 --public ''${PONG_PUBLIC}
+      WorkingDirectory=/var/lib/pong-gateway
+      StateDirectory=pong-gateway
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+    '';
+
+    # Scrip que copia binario + unit y activa el servicio (distro-agnostico).
+    packages."x86_64-linux".installSystemd = pkgs.writeShellScriptBin "install-pong-gateway" ''
+      set -euo pipefail
+      BIN=${self.packages."x86_64-linux".pong-gateway}/bin/pong-gateway
+      UNIT=${self.packages."x86_64-linux".systemdUnit}/pong-gateway.service
+
+      install -m 0755 "$BIN" /usr/local/bin/pong-gateway
+      install -m 0644 "$UNIT" /etc/systemd/system/pong-gateway.service
+
+      if [ ! -e /etc/pong-gateway.env ]; then
+        echo "PONG_PUBLIC=<EIP_ELASTICA>" > /etc/pong-gateway.env
+        echo "OJO: edita /etc/pong-gateway.env con la IP publica real."
+      fi
+
+      systemctl daemon-reload
+      systemctl enable --now pong-gateway
+    '';
+
     # ── NixOS module (systemd service) ──────────────────────────────
     nixosModules.pong-gateway = { config, lib, pkgs, ... }: let
       cfg = config.services.pong-gateway;
@@ -101,6 +143,7 @@
               "--listen" cfg.listen
               "--public" cfg.public
             ];
+            WorkingDirectory = "/var/lib/pong-gateway";
             StateDirectory = "pong-gateway";
             DynamicUser = true;
             Restart = "on-failure";

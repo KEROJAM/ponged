@@ -1,0 +1,10 @@
+# Evita subir artefactos locales al contexto de build de Docker.
+target/
+result
+result-*
+pong_history.sqlite
+*history.sqlite
+gateway.key
+*.key
+.git/
+.flake-lock*
