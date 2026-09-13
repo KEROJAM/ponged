@@ -468,6 +468,7 @@ fn main() {
         .init_resource::<menu::PendingMatch>()
         .init_resource::<menu::MatchIntent>()
         .init_resource::<menu::GatewayMatch>()
+        .init_resource::<menu::PreMatch>()
         .init_resource::<menu::AutoSearch>()
         .init_resource::<menu::PeerNames>()
         .init_resource::<menu::OptionsOpen>()
@@ -503,6 +504,14 @@ fn main() {
         .add_systems(
             Update,
             menu::update_discovery.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
+            menu::update_prematch.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
+            menu::update_elo_bar.run_if(in_state(AppState::Menu)),
         )
         .add_systems(
             Update,
@@ -641,10 +650,12 @@ mod networking_demo {
         )));
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn on_peer_connected(
         ev: On<NetEvent>,
         mut peers: ResMut<Peers>,
         mut gateway_match: ResMut<crate::menu::GatewayMatch>,
+        mut pre: ResMut<crate::menu::PreMatch>,
         gateway: Res<crate::networking::GatewayState>,
         username: Res<crate::menu::Username>,
         search: Res<crate::menu::AutoSearch>,
@@ -662,21 +673,30 @@ mod networking_demo {
                     },
                 });
             }
-            // M6: the opponent the gateway matched us with connected — kick the
-            // same invite/accept handshake used on LAN.
+            // M6: the opponent the gateway matched us with connected. The match
+            // itself is gated by the pre-match dialog; flush an acceptance that
+            // was sent before the connection was up.
             if is_matched {
                 gateway_match.0 = None;
-                info!("Gateway-matched opponent {peer} connected; challenging");
-                let _ = channels.commands.send(NetCommand::SendRequest {
-                    peer: *peer,
-                    request: Request::InviteToPlay,
-                });
+                if pre.self_accepted && pre.opponent == Some(*peer) {
+                    info!("Resending acceptance to {peer}");
+                    let _ = channels.commands.send(NetCommand::SendRequest {
+                        peer: *peer,
+                        request: Request::AcceptMatch,
+                    });
+                }
             }
-            // Auto-search (M5 "Jugar"): challenge any fresh LAN peer, but never
-            // the gateway itself or the just-consumed gateway match.
+            // Auto-search (M5 "Jugar"): offer a match to a fresh LAN peer, one
+            // at a time — never the gateway itself or an already-paired peer.
             let is_gateway = gateway.peer == Some(*peer);
-            if search.0 && !is_gateway && !is_matched {
-                info!("Challenging discovered peer {peer}");
+            if search.0
+                && !is_gateway
+                && !is_matched
+                && pre.idle()
+                && !pre.rejected.contains(peer)
+            {
+                info!("Offering a match to discovered peer {peer}");
+                pre.begin(*peer);
                 let _ = channels.commands.send(NetCommand::SendRequest {
                     peer: *peer,
                     request: Request::InviteToPlay,
@@ -699,6 +719,9 @@ mod networking_demo {
                 Request::State(snapshot) => latest.0 = Some(*snapshot),
                 Request::InviteToPlay | Request::MatchStart => {
                     // Handled by `menu::on_game_request`.
+                }
+                Request::AcceptMatch | Request::DeclineMatch => {
+                    // Pre-match confirmation handshake, handled by `menu::on_game_request`.
                 }
                 Request::MigrateHost(_) | Request::HostMigrated => {
                     // Host migration coordination, handled by `menu::on_game_request`.

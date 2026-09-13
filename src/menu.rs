@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::asset::AssetId;
 use bevy::prelude::*;
@@ -12,7 +12,9 @@ use crate::history::MatchHistory;
 use crate::networking::{GatewayState, NetChannels, NetCommand, NetEvent, short_peer};
 use crate::networking_demo::{IsHost, Peers, RemoteWorld};
 use crate::sim::{self, MatchSim};
-use ponged::protocol::{GatewayRequest, GatewayResponse, Request as GameRequest};
+use ponged::protocol::{
+    next_rank_name, rank_progress, GatewayRequest, GatewayResponse, Request as GameRequest,
+};
 
 /// Default gateway address to dial. Override with `PONG_GATEWAY`.
 const GATEWAY_DEFAULT_ADDR: &str = "/ip4/127.0.0.1/tcp/4001";
@@ -117,10 +119,104 @@ pub struct PendingMatch(pub Option<PeerId>);
 #[derive(Resource, Default)]
 pub struct LocalPeerId(pub Option<PeerId>);
 
-/// The opponent the gateway matched us with; we dial them and auto-challenge
-/// on connect.
+/// The opponent the gateway matched us with; we dial them and show the
+/// pre-match confirmation dialog.
 #[derive(Resource, Default)]
 pub struct GatewayMatch(pub Option<PeerId>);
+
+/// Seconds the other player has to answer the pair request.
+const PREMATCH_ACCEPT_SECS: f32 = 20.0;
+/// Countdown shown once both players accept before the match starts.
+const PREMATCH_COUNTDOWN_SECS: f32 = 5.0;
+/// Backoff before hunting again after a pairing falls through, so we don't
+/// instantly re-pair with the same player on the gateway.
+const PREMATCH_RESUME_SECS: f32 = 8.0;
+
+/// A pending pairing that is waiting for both players to press "Aceptar" (M6).
+/// After a gateway `MatchFound` or a LAN `InviteToPlay` we show a dialog; the
+/// match only starts once both sides send [`GameRequest::AcceptMatch`] and the
+/// countdown runs out. A decline or a timeout cancels it and resumes searching.
+#[derive(Resource, Default)]
+pub struct PreMatch {
+    pub opponent: Option<PeerId>,
+    pub self_accepted: bool,
+    pub opp_accepted: bool,
+    /// Acceptance window remaining while we wait for the other player.
+    pub waiting: Option<Timer>,
+    /// Five-second countdown after both players accept.
+    pub countdown: Option<Timer>,
+    /// Backoff before re-hunting after a cancelled pairing.
+    pub resume: Option<Timer>,
+    /// Peers that declined or were cancelled this search session.
+    pub rejected: HashSet<PeerId>,
+}
+
+impl PreMatch {
+    /// Offers a match to `opponent` and opens the confirmation dialog.
+    pub fn begin(&mut self, opponent: PeerId) {
+        self.opponent = Some(opponent);
+        self.self_accepted = false;
+        self.opp_accepted = false;
+        self.waiting = Some(Timer::from_seconds(
+            PREMATCH_ACCEPT_SECS,
+            TimerMode::Once,
+        ));
+        self.countdown = None;
+        self.resume = None;
+    }
+
+    pub fn idle(&self) -> bool {
+        self.opponent.is_none()
+    }
+
+    /// Records the other player accepting; returns true if it changed anything.
+    pub fn accepted_peer(&mut self, peer: PeerId) -> bool {
+        if self.opponent != Some(peer) {
+            return false;
+        }
+        self.opp_accepted = true;
+        self.start_countdown_if_ready();
+        true
+    }
+
+    /// Records our own acceptance and turns on the countdown once both sides
+    /// have accepted.
+    pub fn accept(&mut self) {
+        self.self_accepted = true;
+        self.start_countdown_if_ready();
+    }
+
+    /// Marks the pairing as failed and remembers the opponent so we don't
+    /// instantly challenge them again.
+    pub fn cancel(&mut self) {
+        if let Some(peer) = self.opponent.take() {
+            self.rejected.insert(peer);
+        }
+        self.self_accepted = false;
+        self.opp_accepted = false;
+        self.waiting = None;
+        self.countdown = None;
+    }
+
+    /// The pairing is confirmed and the match is about to start.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn start_countdown_if_ready(&mut self) {
+        if self.self_accepted && self.opp_accepted && self.countdown.is_none() {
+            self.waiting = None;
+            self.countdown = Some(Timer::from_seconds(
+                PREMATCH_COUNTDOWN_SECS,
+                TimerMode::Once,
+            ));
+            info!("Both players accepted; match starts in {PREMATCH_COUNTDOWN_SECS}s");
+        }
+    }
+}
+
+/// Width in pixels of the ELO progress bar under the player's name.
+const ELO_BAR_WIDTH: f32 = 260.0;
 
 // --- Marker components -----------------------------------------------------
 
@@ -152,6 +248,25 @@ pub struct NodeLink;
 pub struct NodeLabel;
 #[derive(Component)]
 pub struct ButtonText;
+
+/// Progress bar under the player's name showing ELO progress to next rank.
+#[derive(Component)]
+pub struct EloBar;
+#[derive(Component)]
+pub struct EloBarFill;
+#[derive(Component)]
+pub struct EloLabel;
+
+/// Confirmation overlay shown when a pairing waits for both players.
+#[derive(Component)]
+pub struct PreMatchRoot;
+#[derive(Component)]
+pub struct PreMatchText;
+#[derive(Clone, Copy, Component, PartialEq, Eq)]
+pub enum PreMatchButton {
+    Accept,
+    Reject,
+}
 
 /// Which text line a label node belongs to.
 #[derive(Clone, Copy, Component, PartialEq, Eq)]
@@ -275,6 +390,32 @@ pub fn spawn_menu(
                 TextLine::You,
                 Text::new("Player"),
                 TextFont::from_font_size(16.0),
+                TextColor(DIM),
+            ),
+            (
+                EloBar,
+                Node {
+                    width: px(ELO_BAR_WIDTH),
+                    height: px(12.),
+                    border: UiRect::all(px(2.)),
+                    ..default()
+                },
+                BackgroundColor(Color::NONE),
+                BorderColor::all(Color::WHITE),
+                children![(
+                    EloBarFill,
+                    Node {
+                        width: percent(100.),
+                        height: percent(100.),
+                        ..default()
+                    },
+                    BackgroundColor(Color::WHITE),
+                )],
+            ),
+            (
+                EloLabel,
+                Text::new(""),
+                TextFont::from_font_size(13.0),
                 TextColor(DIM),
             ),
             (
@@ -459,6 +600,52 @@ pub fn spawn_menu(
             ],
         ),],
     ));
+
+    commands.spawn((
+        PreMatchRoot,
+        Node {
+            width: percent(100.),
+            height: percent(100.),
+            position_type: PositionType::Absolute,
+            display: Display::None,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
+        children![(
+            Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: px(16.),
+                padding: UiRect::all(px(36.)),
+                border: UiRect::all(px(2.)),
+                ..default()
+            },
+            BackgroundColor(Color::BLACK),
+            BorderColor::all(Color::WHITE),
+            children![
+                (
+                    PreMatchText,
+                    Text::new(""),
+                    TextFont::from_font_size(20.0),
+                    TextColor(Color::WHITE),
+                    TextLayout::justify(Justify::Center),
+                ),
+                (
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(20.),
+                        ..default()
+                    },
+                    children![
+                        prematch_button(PreMatchButton::Accept, "Aceptar partida"),
+                        prematch_button(PreMatchButton::Reject, "Rechazar"),
+                    ],
+                ),
+            ],
+        ),],
+    ));
 }
 
 /// Width of each staircase button: "Jugar" is the longest and the rest step
@@ -492,6 +679,28 @@ fn menu_button(action: MenuButton, label: &str) -> impl Bundle {
     )
 }
 
+/// A button on the pre-match confirmation dialog.
+fn prematch_button(action: PreMatchButton, label: &str) -> impl Bundle {
+    (
+        action,
+        Button,
+        Node {
+            min_width: px(180.),
+            padding: UiRect::axes(px(26.), px(10.)),
+            border: UiRect::all(px(2.)),
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+        BorderColor::all(Color::WHITE),
+        children![(
+            ButtonText,
+            Text::new(label),
+            TextFont::from_font_size(24.0),
+            TextColor(Color::WHITE),
+        )],
+    )
+}
+
 /// Removes the matchmaking screen, the field décor and the player network.
 #[allow(clippy::type_complexity)]
 pub fn despawn_menu(
@@ -502,6 +711,7 @@ pub fn despawn_menu(
             With<MenuRoot>,
             With<OptionsRoot>,
             With<OnboardingRoot>,
+            With<PreMatchRoot>,
             With<MenuField>,
             With<NodeHub>,
             With<NodeHubLabel>,
@@ -629,11 +839,13 @@ pub fn on_gateway_response(
 }
 
 /// Consumes gateway *requests* — currently the `MatchFound` push announcing a
-/// reserved match (M6 → M5).
+/// reserved match (M6 → M5). The pairing opens the confirmation dialog instead
+/// of auto-challenging.
 pub fn on_gateway_request(
     ev: On<NetEvent>,
     mut matched: ResMut<GatewayMatch>,
     mut intent: ResMut<MatchIntent>,
+    mut pre: ResMut<PreMatch>,
     channels: Res<NetChannels>,
 ) {
     let NetEvent::GatewayRequest { peer, request } = ev.event() else {
@@ -649,6 +861,16 @@ pub fn on_gateway_request(
                 return;
             };
             info!("Gateway matched us with {opponent_peer}; dialing via {addresses:?}");
+            // A LAN pairing (if any) gives way to the gateway's match.
+            if let Some(old) = pre.opponent {
+                info!("Discarding LAN pairing with {old} for the gateway match");
+                let _ = channels.commands.send(NetCommand::SendRequest {
+                    peer: old,
+                    request: GameRequest::DeclineMatch,
+                });
+                pre.cancel();
+            }
+            pre.begin(opponent_peer);
             matched.0 = Some(opponent_peer);
             *intent = MatchIntent::Hosting;
             for addr in addresses {
@@ -725,6 +947,7 @@ pub fn on_game_request(
     mut is_host: ResMut<IsHost>,
     channels: Res<NetChannels>,
     mut names: ResMut<PeerNames>,
+    mut pre: ResMut<PreMatch>,
     mut commands: Commands,
 ) {
     let NetEvent::GameRequest { peer, request } = ev.event() else {
@@ -738,14 +961,36 @@ pub fn on_game_request(
             }
         }
         GameRequest::InviteToPlay => {
-            info!("{peer} invited us to play");
-            opponent.0 = Some(*peer);
-            *intent = MatchIntent::Idle;
-            let _ = channels.commands.send(NetCommand::SendRequest {
-                peer: *peer,
-                request: GameRequest::MatchStart,
-            });
-            start_match(*peer, &state, &mut next, &mut pending, &local, &mut is_host);
+            if *state == AppState::Menu {
+                if pre.opponent.is_none() {
+                    info!("{peer} invited us to play; asking for confirmation");
+                    pre.begin(*peer);
+                }
+            } else {
+                // Already mid-game: fall back to accepting the challenge right
+                // away and join a fresh round next frame.
+                info!("{peer} invited us to play");
+                opponent.0 = Some(*peer);
+                *intent = MatchIntent::Idle;
+                let _ = channels.commands.send(NetCommand::SendRequest {
+                    peer: *peer,
+                    request: GameRequest::MatchStart,
+                });
+                start_match(*peer, &state, &mut next, &mut pending, &local, &mut is_host);
+            }
+        }
+        GameRequest::AcceptMatch => {
+            if pre.accepted_peer(*peer) {
+                info!("{peer} accepted the match");
+            } else {
+                debug!("AcceptMatch from non-opponent {peer}");
+            }
+        }
+        GameRequest::DeclineMatch => {
+            if pre.opponent == Some(*peer) {
+                info!("{peer} declined the match; searching for another rival");
+                cancel_pairing(&mut pre, &channels, "rival rejected the offer");
+            }
         }
         GameRequest::MatchStart => {
             info!("{peer} accepted our challenge");
@@ -927,6 +1172,7 @@ pub fn update_menu(
     peers: Res<Peers>,
     gateway: Res<GatewayState>,
     matched: Res<GatewayMatch>,
+    pre: Res<PreMatch>,
     history: Res<MatchHistory>,
     mut labels: Query<(&mut Text, &TextLine)>,
 ) {
@@ -946,7 +1192,9 @@ pub fn update_menu(
     set_text(
         &mut labels,
         TextLine::Status,
-        if search.0 {
+        if pre.opponent.is_some() {
+            "¡Partida encontrada! Confirma en la ventana para empezar.".to_string()
+        } else if search.0 {
             if visible == 0 {
                 "Buscando rivales en LAN y WAN…".to_string()
             } else {
@@ -996,6 +1244,30 @@ fn gateway_line(gateway: &GatewayState, matched: &GatewayMatch) -> String {
     }
 }
 
+/// Refreshes the ELO progress bar under the player's name: the fill grows from
+/// the floor of the current rank toward the next threshold.
+pub fn update_elo_bar(
+    gateway: Res<GatewayState>,
+    mut bar: Single<&mut Node, With<EloBarFill>>,
+    mut label: Single<&mut Text, With<EloLabel>>,
+) {
+    let Some(rank) = gateway.rank.as_deref() else {
+        bar.width = px(0.0);
+        label.0 = String::new();
+        return;
+    };
+    let rating = gateway.rating;
+    let progress = rank_progress(rating);
+    bar.width = px(ELO_BAR_WIDTH * progress);
+    label.0 = match next_rank_name(rating) {
+        Some(next) => {
+            let pct = (progress * 100.0).round() as i32;
+            format!("{rating} ELO · {pct}% para {next}")
+        }
+        None => format!("{rating} ELO · {rank}"),
+    };
+}
+
 /// Handles the main menu buttons (hover feedback + presses).
 #[allow(clippy::too_many_arguments)]
 pub fn update_buttons(
@@ -1007,6 +1279,7 @@ pub fn update_buttons(
     username: Res<Username>,
     channels: Res<NetChannels>,
     mut options_open: ResMut<OptionsOpen>,
+    mut pre: ResMut<PreMatch>,
     mut exit: MessageWriter<AppExit>,
 ) {
     for (interaction, action, children, mut bg) in &mut buttons {
@@ -1032,10 +1305,14 @@ pub fn update_buttons(
                             request: GatewayRequest::LeaveQueue,
                         });
                     }
+                    if pre.opponent.is_some() {
+                        cancel_pairing(&mut pre, &channels, "search stopped");
+                    }
                     info!("Search stopped");
                 } else {
                     search.0 = true;
-                    start_search(&mut gateway, &channels, &username, &peers);
+                    pre.rejected.clear();
+                    start_search(&mut gateway, &channels, &username, &peers, &mut pre);
                     info!("Searching for opponents (LAN + WAN)");
                 }
             }
@@ -1055,6 +1332,7 @@ fn start_search(
     channels: &NetChannels,
     username: &Username,
     peers: &Peers,
+    pre: &mut PreMatch,
 ) {
     let gw_addr =
         std::env::var("PONG_GATEWAY").unwrap_or_else(|_| GATEWAY_DEFAULT_ADDR.to_string());
@@ -1098,15 +1376,192 @@ fn start_search(
         _ => {}
     }
 
+    invite_next_peer(pre, gateway, peers, channels);
+}
+
+/// Offers a match to the first known non-gateway, non-rejected peer. Callers
+/// run this when the hunt starts or resumes after a failed pairing.
+fn invite_next_peer(pre: &mut PreMatch, gateway: &GatewayState, peers: &Peers, channels: &NetChannels) {
+    if !pre.idle() {
+        return;
+    }
     for peer in &peers.0 {
-        if gateway.peer == Some(*peer) {
+        if gateway.peer == Some(*peer) || pre.rejected.contains(peer) {
             continue;
         }
+        info!("Offering a match to {peer}");
+        pre.begin(*peer);
         let _ = channels.commands.send(NetCommand::SendRequest {
             peer: *peer,
             request: GameRequest::InviteToPlay,
         });
+        return;
     }
+}
+
+/// Tears down the current pairing: tells the opponent we won't play and starts
+/// the backoff before we hunt again.
+fn cancel_pairing(pre: &mut PreMatch, channels: &NetChannels, reason: &str) {
+    if let Some(peer) = pre.opponent {
+        info!("Cancelling pairing with {peer}: {reason}");
+        let _ = channels.commands.send(NetCommand::SendRequest {
+            peer,
+            request: GameRequest::DeclineMatch,
+        });
+        pre.cancel();
+    }
+    pre.resume = Some(Timer::from_seconds(
+        PREMATCH_RESUME_SECS,
+        TimerMode::Once,
+    ));
+}
+
+/// Back into the hunt after a cancelled pairing: re-enter the gateway queue
+/// (if we were queued) and offer a match to the next LAN peer.
+fn resume_search(
+    pre: &mut PreMatch,
+    search: &AutoSearch,
+    gateway: &GatewayState,
+    peers: &Peers,
+    channels: &NetChannels,
+) {
+    if !pre.idle() || !search.0 {
+        return;
+    }
+    // The gateway removes both sides from its queue on a match without sending
+    // `Dequeued`, so our local `queued` flag can be stale. Re-queue anyway: the
+    // gateway dedups players already queued.
+    if gateway.connected
+        && gateway.reserved
+        && let Some(gw) = gateway.peer
+    {
+        info!("Re-entering the gateway matchmaking queue");
+        let _ = channels.commands.send(NetCommand::SendGatewayRequest {
+            peer: gw,
+            request: GatewayRequest::QueueMatch,
+        });
+    }
+    invite_next_peer(pre, gateway, peers, channels);
+}
+
+/// The other player's display name when we know it, its short peer id otherwise.
+fn peer_label(names: &PeerNames, peer: PeerId) -> String {
+    match names.0.get(&peer) {
+        Some(name) if !name.trim().is_empty() => name.clone(),
+        _ => short_peer(peer),
+    }
+}
+
+/// Drives the pre-match confirmation dialog: shows/hides it, ticks the
+/// acceptance window and the countdown, and starts the match once the countdown
+/// ends. A decline or a timeout cancels the pairing and resumes the hunt.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn update_prematch(
+    state: Res<State<AppState>>,
+    mut next: ResMut<NextState<AppState>>,
+    time: Res<Time>,
+    mut pre: ResMut<PreMatch>,
+    search: Res<AutoSearch>,
+    gateway: Res<GatewayState>,
+    peers: Res<Peers>,
+    mut pending: ResMut<PendingMatch>,
+    local: Res<LocalPeerId>,
+    mut is_host: ResMut<IsHost>,
+    names: Res<PeerNames>,
+    channels: Res<NetChannels>,
+    mut root: Single<&mut Node, With<PreMatchRoot>>,
+    mut label: Single<&mut Text, With<PreMatchText>>,
+    mut buttons: Query<(
+        &Interaction,
+        &PreMatchButton,
+        &Children,
+        &mut BackgroundColor,
+    )>,
+    mut button_texts: Query<&mut TextColor, (With<ButtonText>, Without<PreMatchButton>)>,
+) {
+    // Backoff: after a cancelled pairing, wait a moment before re-hunting.
+    let resume_finished = if let Some(resume) = &mut pre.resume {
+        resume.tick(time.delta()).just_finished()
+    } else {
+        false
+    };
+    if resume_finished {
+        pre.resume = None;
+        resume_search(
+            &mut pre,
+            &search,
+            &gateway,
+            &peers,
+            &channels,
+        );
+    }
+
+    let Some(opponent) = pre.opponent else {
+        root.display = Display::None;
+        return;
+    };
+    root.display = Display::Flex;
+
+    for (interaction, action, children, mut bg) in &mut buttons {
+        let hovered = *interaction == Interaction::Hovered;
+        bg.0 = if hovered { Color::WHITE } else { Color::NONE };
+        for child in children {
+            if let Ok(mut tc) = button_texts.get_mut(*child) {
+                tc.0 = if hovered { Color::BLACK } else { Color::WHITE };
+            }
+        }
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match action {
+            PreMatchButton::Accept => {
+                if !pre.self_accepted {
+                    info!("Accepting the match against {opponent}");
+                    let _ = channels.commands.send(NetCommand::SendRequest {
+                        peer: opponent,
+                        request: GameRequest::AcceptMatch,
+                    });
+                    pre.accept();
+                }
+            }
+            PreMatchButton::Reject => {
+                cancel_pairing(&mut pre, &channels, "player declined");
+                return;
+            }
+        }
+    }
+
+    // Acceptance window: once it runs out without both accepting, cancel.
+    if let Some(waiting) = &mut pre.waiting
+        && waiting.tick(time.delta()).just_finished()
+    {
+        cancel_pairing(&mut pre, &channels, "confirmation timed out");
+        return;
+    }
+
+    // Countdown after both players accept: start the match when it finishes.
+    if let Some(countdown) = &mut pre.countdown
+        && countdown.tick(time.delta()).just_finished()
+    {
+        start_match(opponent, &state, &mut next, &mut pending, &local, &mut is_host);
+        pre.reset();
+        return;
+    }
+
+    let who = peer_label(&names, opponent);
+    label.0 = if let Some(waiting) = &pre.waiting {
+        format!(
+            "Emparejado con {who}\n¿Aceptas la partida?  ({} s)",
+            waiting.remaining_secs().ceil().max(0.0) as i32
+        )
+    } else if let Some(countdown) = &pre.countdown {
+        format!(
+            "¡Aceptada! {who}\nLa partida empieza en {}…",
+            countdown.remaining_secs().ceil().max(0.0) as i32
+        )
+    } else {
+        format!("Emparejado con {who}…")
+    };
 }
 
 /// Options overlay: save the username, or go back.

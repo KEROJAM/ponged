@@ -60,9 +60,16 @@ pub enum Request {
         #[serde(default)]
         name: String,
     },
-    /// Ask the other side for a match ("let's play"). The receiver accepts by
-    /// replying with [`Request::MatchStart`].
+    /// Ask the other side for a match ("let's play"). The receiver confirms
+    /// through the pre-match dialog and answers with [`Request::AcceptMatch`].
     InviteToPlay,
+    /// Tell the other side we accept the paired match. Once both players have
+    /// exchanged [`Request::AcceptMatch`], each side runs a short countdown
+    /// and the match starts.
+    AcceptMatch,
+    /// Tell the other side we will not play: the pairing is cancelled and both
+    /// sides go back to searching for another opponent.
+    DeclineMatch,
     /// Confirms the match to the challenger and tells them to start playing.
     MatchStart,
     /// Push a fresh authoritative snapshot to the other side.
@@ -157,15 +164,37 @@ pub const RANKS: [&str; 9] = [
 /// Lower bound (inclusive) of each rank's ELO range.
 const RANK_THRESHOLDS: [i32; 9] = [0, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400];
 
-/// Maps an ELO rating to one of the [`RANKS`].
-pub fn rank_for_rating(rating: i32) -> &'static str {
-    let mut rank = RANKS[0];
+/// Index of the rank tier that `rating` currently belongs to.
+fn rank_index(rating: i32) -> usize {
+    let mut idx = 0;
     for (i, threshold) in RANK_THRESHOLDS.iter().enumerate() {
         if rating >= *threshold {
-            rank = RANKS[i];
+            idx = i;
         }
     }
-    rank
+    idx
+}
+
+/// Maps an ELO rating to one of the [`RANKS`].
+pub fn rank_for_rating(rating: i32) -> &'static str {
+    RANKS[rank_index(rating)]
+}
+
+/// The rank the player will be promoted to next, or `None` at the top tier.
+pub fn next_rank_name(rating: i32) -> Option<&'static str> {
+    RANKS.get(rank_index(rating) + 1).copied()
+}
+
+/// How close `rating` is to the next rank: `0.0` at the floor of the current
+/// tier, growing to `1.0` at the next threshold (full for the top tier).
+pub fn rank_progress(rating: i32) -> f32 {
+    let idx = rank_index(rating);
+    if idx == RANK_THRESHOLDS.len() - 1 {
+        return 1.0;
+    }
+    let floor = RANK_THRESHOLDS[idx];
+    let next = RANK_THRESHOLDS[idx + 1];
+    ((rating - floor) as f32 / (next - floor) as f32).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -208,6 +237,30 @@ mod tests {
     fn negative_ratings_are_brick() {
         assert_eq!(rank_for_rating(-1), "Brick");
         assert_eq!(rank_for_rating(i32::MIN), "Brick");
+    }
+
+    #[test]
+    fn rank_progress_inside_tier() {
+        assert_eq!(rank_progress(300), 0.3);
+        assert_eq!(rank_progress(1000), 0.0);
+        assert_eq!(rank_progress(1100), 0.5);
+        assert_eq!(rank_progress(1199), 0.995);
+        assert_eq!(rank_progress(2399), 0.995);
+    }
+
+    #[test]
+    fn rank_progress_full_at_top_tier() {
+        assert_eq!(rank_progress(2400), 1.0);
+        assert_eq!(rank_progress(9999), 1.0);
+    }
+
+    #[test]
+    fn next_rank_names() {
+        assert_eq!(next_rank_name(300), Some("Bronze"));
+        assert_eq!(next_rank_name(1100), Some("Silver"));
+        assert_eq!(next_rank_name(2399), Some("Pong Legend"));
+        assert_eq!(next_rank_name(2400), None);
+        assert_eq!(next_rank_name(9999), None);
     }
 
     #[test]
