@@ -933,9 +933,12 @@ pub fn update_menu(
     set_text(
         &mut labels,
         TextLine::You,
-        match local.0 {
-            Some(id) => format!("{}  ·  {}", username.0, short_peer(id)),
-            None => username.0.clone(),
+        match &gateway.rank {
+            Some(rank) => format!("{}  ·  {}", username.0, rank),
+            None => match local.0 {
+                Some(id) => format!("{}  ·  {}", username.0, short_peer(id)),
+                None => username.0.clone(),
+            },
         },
     );
 
