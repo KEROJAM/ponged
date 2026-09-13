@@ -13,7 +13,7 @@ use crate::menu::Opponent;
 use crate::networking::{short_peer, GatewayState, NetChannels, NetCommand};
 use crate::networking_demo::{IsHost, RemoteWorld};
 use crate::Score;
-use proyecto_final::protocol::GatewayRequest;
+use ponged::protocol::GatewayRequest;
 
 /// How many past matches the ranking panel shows.
 const HISTORY_LIMIT: usize = 10;

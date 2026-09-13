@@ -1,7 +1,7 @@
 use bevy::camera::ScalingMode;
 use bevy::math::bounding::{Aabb2d, BoundingVolume, IntersectsVolume};
 use bevy::prelude::*;
-use proyecto_final::protocol;
+use ponged::protocol;
 
 mod history;
 mod menu;
@@ -274,7 +274,11 @@ fn spawn_scoreboard(mut commands: Commands) {
         },
     );
 
-    commands.spawn((Hud, container, children![(header, children![player_score, opponent_score])]));
+    commands.spawn((
+        Hud,
+        container,
+        children![(header, children![player_score, opponent_score])],
+    ));
 }
 
 fn update_scoreboard(
@@ -307,6 +311,91 @@ fn update_scoreboard(
 fn project_positions(mut positionables: Query<(&mut Transform, &Position)>) {
     for (mut transform, position) in &mut positionables {
         transform.translation = position.0.extend(0.);
+    }
+}
+
+// --- Game over UI ----------------------------------------------------------
+
+#[derive(Component)]
+struct GameOverRoot;
+
+#[derive(Component)]
+struct GameOverTitle;
+
+/// Resets the match_over flag when entering a new match.
+fn reset_match_over(mut match_over: ResMut<sim::MatchOver>) {
+    match_over.0 = false;
+}
+
+/// Spawns the game-over overlay (hidden by default, shown when match ends).
+fn spawn_game_over_ui(mut commands: Commands) {
+    commands.spawn((
+        GameOverRoot,
+        Node {
+            width: percent(100.0),
+            height: percent(100.0),
+            position_type: PositionType::Absolute,
+            top: px(0.0),
+            left: px(0.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            display: Display::None,
+            row_gap: px(16.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.85)),
+        children![
+            (
+                GameOverTitle,
+                Text::new(""),
+                TextFont::from_font_size(64.0),
+                TextColor(Color::WHITE),
+                TextLayout::justify(Justify::Center),
+            ),
+            (
+                Text::new("Press ESC to return to menu"),
+                TextFont::from_font_size(20.0),
+                TextColor(Color::srgb(0.7, 0.7, 0.7)),
+                TextLayout::justify(Justify::Center),
+            ),
+        ],
+    ));
+}
+
+/// Shows the game-over overlay and sets the appropriate text when the match ends.
+fn update_game_over_ui(
+    match_over: Res<sim::MatchOver>,
+    score: Res<Score>,
+    host: Res<networking_demo::IsHost>,
+    world: Res<networking_demo::RemoteWorld>,
+    mut root: Query<&mut Node, With<GameOverRoot>>,
+    mut title: Single<&mut Text, With<GameOverTitle>>,
+) {
+    if !match_over.is_changed() {
+        return;
+    }
+    for mut node in &mut root {
+        if match_over.0 {
+            node.display = Display::Flex;
+            let (player_score, opponent_score) = if host.0 {
+                (score.player, score.opponent)
+            } else {
+                match world.curr {
+                    Some(snap) => (snap.opponent_score, snap.player_score),
+                    None => return,
+                }
+            };
+            title.0 = if player_score > opponent_score {
+                format!("You win! {player_score} - {opponent_score}")
+            } else if player_score == 0 && opponent_score >= sim::WIN_SCORE {
+                "YOU JUST GOT PONGED!".to_string()
+            } else {
+                format!("You lose! {player_score} - {opponent_score}")
+            };
+        } else {
+            node.display = Display::None;
+        }
     }
 }
 
@@ -343,7 +432,13 @@ fn cleanup_playing(
     mut commands: Commands,
     game: Query<
         Entity,
-        Or<(With<Ball>, With<Paddle>, With<Gutter>, With<Hud>)>,
+        Or<(
+            With<Ball>,
+            With<Paddle>,
+            With<Gutter>,
+            With<Hud>,
+            With<GameOverRoot>,
+        )>,
     >,
 ) {
     for entity in &game {
@@ -355,7 +450,11 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(networking::NetworkingPlugin)
-        .insert_resource(Score { player: 0, opponent: 0 })
+        .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(Score {
+            player: 0,
+            opponent: 0,
+        })
         .init_state::<AppState>()
         .init_resource::<networking_demo::Peers>()
         .init_resource::<networking_demo::LatestSnapshot>()
@@ -371,6 +470,7 @@ fn main() {
         .init_resource::<menu::GatewayMatch>()
         .init_resource::<menu::HistoryRender>()
         .init_resource::<history::MatchHistory>()
+        .init_resource::<sim::MatchOver>()
         .add_systems(Startup, (spawn_camera, networking_demo::setup))
         .add_systems(OnEnter(AppState::Menu), menu::spawn_menu)
         .add_systems(OnEnter(AppState::Menu), history::refresh_on_menu)
@@ -394,7 +494,9 @@ fn main() {
                 spawn_gutters,
                 spawn_ball,
                 spawn_scoreboard,
+                spawn_game_over_ui,
                 reset_score,
+                reset_match_over,
                 sim::start_match_sim.run_if(resource_equals(networking_demo::IsHost(true))),
                 history::arm_record,
             ),
@@ -431,6 +533,10 @@ fn main() {
             )
                 .run_if(in_state(AppState::Playing)),
         )
+        .add_systems(
+            Update,
+            update_game_over_ui.run_if(in_state(AppState::Playing)),
+        )
         .add_observer(networking_demo::on_peer_connected)
         .add_observer(networking_demo::on_peer_disconnected)
         .add_observer(networking_demo::on_game_request)
@@ -454,7 +560,7 @@ mod networking_demo {
     use libp2p::PeerId;
 
     use super::protocol::{self, GameSnapshot, Point2, Request};
-    use super::{Ball, Opponent, Player, Position, Score, Velocity, BALL_SPEED};
+    use super::{BALL_SPEED, Ball, Opponent, Player, Position, Score, Velocity};
     use crate::networking::{NetChannels, NetCommand, NetEvent};
 
     /// Peers we are currently connected to.
@@ -566,12 +672,14 @@ mod networking_demo {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn broadcast_snapshot(
         time: Res<Time>,
         mut timer: ResMut<SnapshotTimer>,
         channels: Res<NetChannels>,
         peers: Res<Peers>,
         host: Res<IsHost>,
+        world: Res<RemoteWorld>,
         player: Single<&Position, (With<Player>, Without<Opponent>)>,
         opponent: Single<&Position, (With<Opponent>, Without<Player>)>,
         ball: Single<&Position, With<Ball>>,
@@ -592,6 +700,8 @@ mod networking_demo {
             opponent_paddle: to_point(opponent.0),
             player_score: score.player,
             opponent_score: score.opponent,
+            match_over: false,
+            ball_speed_mult: world.curr.map_or(1.0, |snap| snap.ball_speed_mult),
         };
         seq.0 += 1;
 
@@ -638,7 +748,7 @@ mod networking_demo {
         };
         let extra = (world.elapsed - world.segment).clamp(0.0, EXTRAPOLATE_MAX);
         if extra > 0.0 {
-            base + to_vec2(curr.ball_velocity) * (VELOCITY_SCALE * extra)
+            base + to_vec2(curr.ball_velocity) * (VELOCITY_SCALE * curr.ball_speed_mult * extra)
         } else {
             base
         }
@@ -661,6 +771,7 @@ mod networking_demo {
         mut world: ResMut<RemoteWorld>,
         mut opponent: Single<&mut Position, (With<Opponent>, Without<Player>, Without<Ball>)>,
         mut ball: Single<&mut Position, (With<Ball>, Without<Player>, Without<Opponent>)>,
+        mut match_over: ResMut<crate::sim::MatchOver>,
     ) {
         // Promote newly arrived snapshots into the interpolation window.
         if let Some(next) = latest.0 {
@@ -680,6 +791,7 @@ mod networking_demo {
                 world.curr = Some(next);
                 world.elapsed = 0.0;
             }
+            match_over.0 = next.match_over;
         }
 
         world.elapsed += time.delta_secs_f64() as f32;

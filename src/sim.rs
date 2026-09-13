@@ -7,7 +7,7 @@
 //! snapshot broadcast) on a plain thread driven by a wall clock fixes that,
 //! because the simulation no longer depends on the window at all.
 
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,13 +20,16 @@ use crate::menu::Opponent;
 use crate::networking::{NetChannels, NetCommand};
 use crate::networking_demo::IsHost;
 use crate::{Ball, Opponent as OpponentMarker, Player, Position, Score};
-use proyecto_final::protocol::{GameSnapshot, Point2, Request};
+use ponged::protocol::{GameSnapshot, Point2, Request};
+
+/// Signals that the match has ended (someone reached `WIN_SCORE`).
+/// Read by the game-over UI system in `main.rs`.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MatchOver(pub bool);
 
 // Geometry & tuning mirrors the ECS constants in `main.rs` (kept in sync so the
 // ported simulation behaves exactly like the old ECS one).
-use crate::{
-    BALL_SIZE, BALL_SPEED, FIELD_SIZE, GUTTER_HEIGHT, PADDLE_SHAPE, PADDLE_SPEED,
-};
+use crate::{BALL_SIZE, BALL_SPEED, FIELD_SIZE, GUTTER_HEIGHT, PADDLE_SHAPE, PADDLE_SPEED};
 
 /// Distance from the field edge to gutters and paddles (see `spawn_gutters` /
 /// `spawn_paddles` in `main.rs`).
@@ -40,6 +43,17 @@ const FIXED_DT: Duration = Duration::from_micros(15625);
 /// How often the host pushes a snapshot to the guest (same as the old
 /// `SNAPSHOT_INTERVAL` in `networking_demo`).
 const SNAPSHOT_DT: Duration = Duration::from_micros(1_000_000 / 30);
+
+/// First to this score wins the match.
+pub const WIN_SCORE: u32 = 5;
+
+/// The ball speeds up a little with every paddle hit (rally). `ball_velocity`
+/// holds the *direction* of the serve; this multiplier scales the per-tick
+/// displacement on top of `BALL_SPEED`.
+pub const RALLY_ACCELERATION: f32 = 0.06;
+
+/// Top rally speed. Cap so matches never degenerate into an unreachable ball.
+pub const MAX_BALL_SPEED_MULT: f32 = 2.5;
 
 /// Commands sent to the running host simulation from outside (Bevy keyboard
 /// input, and the remote player's paddle forwarded by the network thread).
@@ -63,6 +77,11 @@ pub struct SimOutput {
     /// Monotonic snapshot counter, kept so a migrated host can continue
     /// numbering snapshots from where the previous host stopped.
     pub seq: u64,
+    /// True once either player reached `WIN_SCORE`. The ball stops moving
+    /// but snapshots keep flowing so the guest can render the final state.
+    pub match_over: bool,
+    /// Current rally speed multiplier (1.0 = base speed, grows per paddle hit).
+    pub ball_speed_mult: f32,
 }
 
 impl SimOutput {
@@ -75,6 +94,8 @@ impl SimOutput {
             score_player: 0,
             score_opponent: 0,
             seq: 0,
+            match_over: false,
+            ball_speed_mult: 1.0,
         }
     }
 }
@@ -99,7 +120,10 @@ fn set_remote_paddle_sink(sink: Option<Sender<SimCommand>>) {
 /// Clone of the sink for the networking thread (or `None` if no match sim is
 /// running, e.g. on the guest or in the menu).
 pub fn remote_paddle_sink() -> Option<Sender<SimCommand>> {
-    REMOTE_PADDLE_SINK.lock().expect("paddle sink poisoned").clone()
+    REMOTE_PADDLE_SINK
+        .lock()
+        .expect("paddle sink poisoned")
+        .clone()
 }
 
 // --- Bevy glue ------------------------------------------------------------
@@ -158,10 +182,7 @@ pub fn stop_match_sim(mut commands: Commands, sim: Option<Res<MatchSim>>) {
 }
 
 /// (Host only) Forwards local keyboard input to the simulation thread.
-pub fn forward_player_input(
-    keyboard_input: Res<ButtonInput<KeyCode>>,
-    sim: Option<Res<MatchSim>>,
-) {
+pub fn forward_player_input(keyboard_input: Res<ButtonInput<KeyCode>>, sim: Option<Res<MatchSim>>) {
     let Some(sim) = sim else { return };
     let velocity = if keyboard_input.pressed(KeyCode::ArrowUp) {
         PADDLE_SPEED
@@ -170,9 +191,7 @@ pub fn forward_player_input(
     } else {
         0.0
     };
-    let _ = sim
-        .sender
-        .send(SimCommand::SetPlayerVelocity(velocity));
+    let _ = sim.sender.send(SimCommand::SetPlayerVelocity(velocity));
 }
 
 /// (Host only) Applies the authoritative simulation state to the entities we
@@ -180,8 +199,9 @@ pub fn forward_player_input(
 pub fn pull_sim_state(
     sim: Option<Res<MatchSim>>,
     mut score: ResMut<Score>,
-    mut player: Single<&mut Position, (With<Player>, Without<Ball>)>,
-    mut opponent: Single<&mut Position, (With<OpponentMarker>, Without<Ball>)>,
+    mut match_over: ResMut<MatchOver>,
+    mut player: Single<&mut Position, (With<Player>, Without<OpponentMarker>, Without<Ball>)>,
+    mut opponent: Single<&mut Position, (With<OpponentMarker>, Without<Player>, Without<Ball>)>,
     mut ball: Single<&mut Position, With<Ball>>,
 ) {
     let Some(sim) = sim else { return };
@@ -191,6 +211,7 @@ pub fn pull_sim_state(
     ball.0 = output.ball;
     score.player = output.score_player;
     score.opponent = output.score_opponent;
+    match_over.0 = output.match_over;
 }
 
 // --- Simulation thread ----------------------------------------------------
@@ -225,6 +246,8 @@ struct SimState {
     score_player: u32,
     score_opponent: u32,
     seq: u64,
+    match_over: bool,
+    ball_speed_mult: f32,
 }
 
 impl SimState {
@@ -239,6 +262,8 @@ impl SimState {
             score_player: 0,
             score_opponent: 0,
             seq: 0,
+            match_over: false,
+            ball_speed_mult: 1.0,
         };
         // Host migration (M7): the guest adopts the previous host's
         // authoritative frame. The snapshot is in the sender's frame, where
@@ -254,11 +279,15 @@ impl SimState {
             state.score_player = snap.opponent_score;
             state.score_opponent = snap.player_score;
             state.seq = snap.seq;
+            state.ball_speed_mult = snap.ball_speed_mult.clamp(1.0, MAX_BALL_SPEED_MULT);
         }
         state
     }
 
     fn step(&mut self) {
+        if self.match_over {
+            return;
+        }
         // Same per-tick order as the old ECS FixedUpdate set: paddles move and
         // are constrained, then the ball moves, bounces, and scores.
         self.player_paddle.y += self.player_velocity;
@@ -266,7 +295,7 @@ impl SimState {
         constrain_paddle(&mut self.player_paddle);
         constrain_paddle(&mut self.opponent_paddle);
 
-        self.ball += self.ball_velocity * BALL_SPEED;
+        self.ball += self.ball_velocity * (BALL_SPEED * self.ball_speed_mult);
         self.handle_paddle_bounces();
         self.handle_gutter_bounces();
         self.detect_goals();
@@ -287,8 +316,15 @@ impl SimState {
                 };
                 self.ball_velocity.x = direction * self.ball_velocity.x.abs();
                 self.ball.x += direction * overlap.x;
+                self.bump_rally_speed();
             }
         }
+    }
+
+    /// Each paddle hit returns the ball a bit faster (capped at
+    /// `MAX_BALL_SPEED_MULT`).
+    fn bump_rally_speed(&mut self) {
+        self.ball_speed_mult = (self.ball_speed_mult + RALLY_ACCELERATION).min(MAX_BALL_SPEED_MULT);
     }
 
     fn handle_gutter_bounces(&mut self) {
@@ -297,10 +333,7 @@ impl SimState {
         let gutter_height = GUTTER_HEIGHT;
         let gutter_half_size = Vec2::new(FIELD_SIZE.x / 2.0, gutter_height / 2.0);
 
-        for gutter_y in [
-            FIELD_SIZE.y / 2.0 - EDGE,
-            -(FIELD_SIZE.y / 2.0 - EDGE),
-        ] {
+        for gutter_y in [FIELD_SIZE.y / 2.0 - EDGE, -(FIELD_SIZE.y / 2.0 - EDGE)] {
             let wall = Aabb2d::new(Vec2::new(0.0, gutter_y), gutter_half_size);
             if let Some(side) = collide_with_side(ball_box, wall) {
                 match side {
@@ -318,10 +351,18 @@ impl SimState {
         if self.ball.x - ball_half.x > half_field.x {
             // Ball left the field on the opponent's side: we scored.
             self.score_player += 1;
+            if self.score_player >= WIN_SCORE {
+                self.match_over = true;
+                return;
+            }
             self.reset_ball(Vec2::new(-BALL_SPEED, 2.0));
         } else if self.ball.x + ball_half.x < -half_field.x {
             // Ball left the field on our side: the opponent scored.
             self.score_opponent += 1;
+            if self.score_opponent >= WIN_SCORE {
+                self.match_over = true;
+                return;
+            }
             self.reset_ball(Vec2::new(BALL_SPEED, 2.0));
         }
     }
@@ -329,6 +370,8 @@ impl SimState {
     fn reset_ball(&mut self, velocity: Vec2) {
         self.ball = Vec2::ZERO;
         self.ball_velocity = velocity;
+        // A fresh serve always starts at normal speed.
+        self.ball_speed_mult = 1.0;
     }
 }
 
@@ -385,6 +428,8 @@ fn build_snapshot(state: &SimState) -> GameSnapshot {
         opponent_paddle: to_point(state.opponent_paddle),
         player_score: state.score_player,
         opponent_score: state.score_opponent,
+        match_over: state.match_over,
+        ball_speed_mult: state.ball_speed_mult,
     }
 }
 
@@ -398,6 +443,8 @@ fn publish(state: &SimState, output: &Arc<Mutex<SimOutput>>) {
         score_player: state.score_player,
         score_opponent: state.score_opponent,
         seq: state.seq,
+        match_over: state.match_over,
+        ball_speed_mult: state.ball_speed_mult,
     };
 }
 
@@ -415,6 +462,8 @@ pub fn build_host_snapshot(sim: &MatchSim) -> GameSnapshot {
         opponent_paddle: to_point(output.opponent_paddle),
         player_score: output.score_player,
         opponent_score: output.score_opponent,
+        match_over: output.match_over,
+        ball_speed_mult: output.ball_speed_mult,
     }
 }
 
@@ -464,5 +513,156 @@ fn run_sim(
             state.seq += 1;
             last_snapshot = now;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn win_at_five_points_for_host() {
+        let mut state = SimState::new(None);
+        // Force the ball out on the opponent's side repeatedly.
+        for _ in 0..WIN_SCORE {
+            state.ball = Vec2::new(half_field_x(), 0.0);
+            state.step(); // detect_goals fires, +1, match_over if reached 5.
+        }
+        state.step();
+        assert_eq!(state.score_player, WIN_SCORE);
+        assert_eq!(state.score_opponent, 0);
+        assert!(state.match_over);
+    }
+
+    #[test]
+    fn win_at_five_points_for_guest() {
+        let mut state = SimState::new(None);
+        for _ in 0..WIN_SCORE {
+            state.ball = Vec2::new(-half_field_x(), 0.0);
+            state.step();
+        }
+        assert_eq!(state.score_opponent, WIN_SCORE);
+        assert_eq!(state.score_player, 0);
+        assert!(state.match_over);
+    }
+
+    #[test]
+    fn no_win_below_five_points() {
+        let mut state = SimState::new(None);
+        for _ in 0..WIN_SCORE - 1 {
+            state.ball = Vec2::new(half_field_x(), 0.0);
+            state.step();
+        }
+        assert!(!state.match_over);
+        assert_eq!(state.score_player, WIN_SCORE - 1);
+    }
+
+    #[test]
+    fn match_over_freezes_ball_and_paddles() {
+        let mut state = SimState::new(None);
+        state.match_over = true;
+        state.player_velocity = PADDLE_SPEED;
+        let ball_before = state.ball;
+        let paddle_before = state.player_paddle;
+        state.step();
+        assert_eq!(state.ball, ball_before);
+        assert_eq!(state.player_paddle, paddle_before);
+    }
+
+    #[test]
+    fn goal_then_win_stops_playing() {
+        // 4-4, one more goal → 5-4, match over, ball must not keep moving.
+        let mut state = SimState::new(None);
+        state.score_player = WIN_SCORE - 1;
+        state.score_opponent = WIN_SCORE - 1;
+        state.ball = Vec2::new(half_field_x(), 0.0);
+        state.step();
+        assert_eq!(state.score_player, WIN_SCORE);
+        assert!(state.match_over);
+        // A further step changes nothing.
+        let ball_before = state.ball;
+        state.player_velocity = PADDLE_SPEED;
+        state.step();
+        assert_eq!(state.ball, ball_before);
+        assert_eq!(state.score_player, WIN_SCORE);
+    }
+
+    #[test]
+    fn ball_speeds_up_after_paddle_hit() {
+        let mut state = SimState::new(None);
+        assert_eq!(state.ball_speed_mult, 1.0);
+        for _ in 0..3 {
+            force_left_paddle_hit(&mut state);
+        }
+        let expected = 1.0 + RALLY_ACCELERATION * 3.0;
+        assert!(
+            (state.ball_speed_mult - expected).abs() < 1e-4,
+            "expected {expected}, got {}",
+            state.ball_speed_mult
+        );
+    }
+
+    #[test]
+    fn rally_speed_caps_at_max() {
+        let mut state = SimState::new(None);
+        state.ball_speed_mult = MAX_BALL_SPEED_MULT;
+        for _ in 0..10 {
+            force_left_paddle_hit(&mut state);
+        }
+        assert_eq!(state.ball_speed_mult, MAX_BALL_SPEED_MULT);
+    }
+
+    #[test]
+    fn serve_resets_rally_speed() {
+        let mut state = SimState::new(None);
+        force_left_paddle_hit(&mut state);
+        assert!(state.ball_speed_mult > 1.0);
+        // A goal restarts the rally at normal speed.
+        state.ball = Vec2::new(half_field_x(), 0.0);
+        state.step();
+        assert_eq!(state.ball_speed_mult, 1.0);
+    }
+
+    #[test]
+    fn migration_preserves_ball_speed() {
+        let mut seed = GameSnapshot {
+            seq: 3,
+            is_host: true,
+            ball: Point2 { x: 10.0, y: 4.0 },
+            ball_velocity: Point2 { x: -2.0, y: 1.0 },
+            player_paddle: Point2 { x: -380.0, y: 5.0 },
+            opponent_paddle: Point2 { x: 380.0, y: -5.0 },
+            player_score: 2,
+            opponent_score: 1,
+            match_over: false,
+            ball_speed_mult: MAX_BALL_SPEED_MULT,
+        };
+        assert_eq!(
+            SimState::new(Some(seed)).ball_speed_mult,
+            MAX_BALL_SPEED_MULT
+        );
+
+        // Out-of-range values are clamped so a bad snapshot can't break the sim.
+        seed.ball_speed_mult = 99.0;
+        assert_eq!(
+            SimState::new(Some(seed)).ball_speed_mult,
+            MAX_BALL_SPEED_MULT
+        );
+        seed.ball_speed_mult = 0.0;
+        assert_eq!(SimState::new(Some(seed)).ball_speed_mult, 1.0);
+    }
+
+    fn half_field_x() -> f32 {
+        // Far enough outside that even after `step` displaces the ball by
+        // `velocity * BALL_SPEED`, it still counts as a goal.
+        FIELD_SIZE.x / 2.0 + 100.0
+    }
+
+    /// Places the ball just in front of the (host's) left paddle and steps once
+    /// so it collides, speeding the rally up.
+    fn force_left_paddle_hit(state: &mut SimState) {
+        state.ball = Vec2::new(-FIELD_SIZE.x / 2.0 + EDGE + 7.0, 0.0);
+        state.ball_velocity = Vec2::new(-BALL_SPEED, 0.0);
+        state.step();
     }
 }

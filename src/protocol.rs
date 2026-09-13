@@ -35,6 +35,19 @@ pub struct GameSnapshot {
     /// Score as seen by the sender: its own points and the opponent's.
     pub player_score: u32,
     pub opponent_score: u32,
+    /// True once either player reached the win score. The ball stops moving
+    /// but snapshots keep flowing so the guest can render the final state.
+    #[serde(default)]
+    pub match_over: bool,
+    /// Current rally speed multiplier (`1.0` = base ball speed, grows with
+    /// each paddle hit). Missing on snapshots from old peers ⇒ normal speed.
+    #[serde(default = "default_ball_speed_mult")]
+    pub ball_speed_mult: f32,
+}
+
+/// Old snapshots without `ball_speed_mult` must default to normal speed.
+fn default_ball_speed_mult() -> f32 {
+    1.0
 }
 
 /// Requests sent over the `/pong/state/1.0.0` protocol.
@@ -111,4 +124,61 @@ pub enum GatewayResponse {
     Rating { rating: i32 },
     Pong,
     Error(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+
+    #[test]
+    fn snapshot_roundtrips_through_cbor() {
+        let snap = GameSnapshot {
+            seq: 42,
+            is_host: true,
+            ball: Point2 { x: 1.5, y: -2.5 },
+            ball_velocity: Point2 { x: -0.5, y: 0.25 },
+            player_paddle: Point2 { x: -380.0, y: 10.0 },
+            opponent_paddle: Point2 { x: 380.0, y: -10.0 },
+            player_score: 3,
+            opponent_score: 2,
+            match_over: false,
+            ball_speed_mult: 1.5,
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &snap).expect("serialize");
+        let decoded: GameSnapshot = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, snap);
+    }
+
+    #[test]
+    fn old_snapshot_without_match_over_deserializes() {
+        // Simulates an older peer that doesn't know the `match_over` field:
+        // it must deserialize with `match_over == false` (serde default).
+        #[derive(Serialize)]
+        struct OldSnapshot {
+            seq: u64,
+            is_host: bool,
+            ball: Point2,
+            ball_velocity: Point2,
+            player_paddle: Point2,
+            opponent_paddle: Point2,
+            player_score: u32,
+            opponent_score: u32,
+        }
+        let old = OldSnapshot {
+            seq: 7,
+            is_host: false,
+            ball: Point2::default(),
+            ball_velocity: Point2::default(),
+            player_paddle: Point2::default(),
+            opponent_paddle: Point2::default(),
+            player_score: 1,
+            opponent_score: 0,
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &old).expect("serialize");
+        let decoded: GameSnapshot = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert!(!decoded.match_over);
+        assert_eq!(decoded.player_score, 1);
+        assert_eq!(decoded.ball_speed_mult, 1.0);
+    }
 }

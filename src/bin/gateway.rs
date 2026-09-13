@@ -38,7 +38,7 @@ use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
     identify, kad, noise, ping, relay, rendezvous, tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
-use proyecto_final::protocol::{
+use ponged::protocol::{
     GatewayRequest, GatewayResponse, GATEWAY_AGENT_VERSION, GATEWAY_PROTOCOL,
 };
 use rusqlite::{params, Connection, OptionalExtension};

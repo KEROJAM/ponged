@@ -7,7 +7,7 @@ use crate::history::MatchHistory;
 use crate::networking::{short_peer, GatewayState, NetChannels, NetCommand, NetEvent};
 use crate::networking_demo::{IsHost, Peers, RemoteWorld};
 use crate::sim::{self, MatchSim};
-use proyecto_final::protocol::{GatewayRequest, GatewayResponse, Request as GameRequest};
+use ponged::protocol::{GatewayRequest, GatewayResponse, Request as GameRequest};
 
 /// Default gateway address to dial. Override with `PONG_GATEWAY`.
 const GATEWAY_DEFAULT_ADDR: &str = "/ip4/127.0.0.1/tcp/4001";
