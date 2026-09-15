@@ -56,6 +56,7 @@
       buildInputs = (old.buildInputs or []) ++ (with static; [
         libudev-zero
         wayland
+	libxkbcommon
       ]);
     });
 
