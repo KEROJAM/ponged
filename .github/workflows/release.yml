@@ -1,91 +1,77 @@
-name: Release Cliente y Servidor
+name: Deploy
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Versión de la release (ej. v1.0.0)"
-        required: true
-        type: string
-      descripcion:
-        description: "Descripción de la release (entregas de este sprint)"
-        required: true
-        type: string
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: write
 
 jobs:
-  compilacion:
-    name: Compilar (${{ matrix.nombre }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            nombre: linux
-            extension: ""
-          - os: windows-latest
-            nombre: windows
-            extension: ".exe"
+  build-and-upload:
+    name: Build and upload
     runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        # You can add more, for any target you'd like!
+        include:
+          - build: linux
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+
+          - build: windows-gnu 
+            os: windows-latest
+            target: x86_64-pc-windows-gnu
+
     steps:
-      - name: Obtener codigo
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      # Linux: binarios estaticos musl (sin dependencias de glibc ni libs del sistema).
-      - name: Instalar Nix (Linux)
-        if: runner.os == 'Linux'
-        uses: DeterminateSystems/nix-installer-action@v16
+      - name: Get the release version from the tag
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
-      - name: Compilar binarios estaticos musl (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          GATEWAY=$(nix build .#pong-gateway --no-link --print-out-paths)
-          CLIENT=$(nix build .#pong-client --no-link --print-out-paths)
-          mkdir -p dist
-          cp "$GATEWAY/bin/pong-gateway" dist/pong-servidor-linux-x86_64
-          cp "$CLIENT/bin/ponged" dist/pong-cliente-linux-x86_64
-
-      - name: Instalar Rust stable (Windows)
-        if: runner.os == 'Windows'
+      - name: Install Rust
+        # Or @nightly if you want
         uses: dtolnay/rust-toolchain@stable
+        # Arguments to pass in
+        with:
+          # Make Rust compile to our target (defined in the matrix)
+          targets: ${{ matrix.target }}
 
-      - name: Compilar cliente y servidor en release (Windows)
-        if: runner.os == 'Windows'
-        run: cargo build --release --bin ponged --bin pong-gateway
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --verbose --release --target ${{ matrix.target }}
 
-      - name: Empaquetar binarios (Windows)
-        if: runner.os == 'Windows'
+      - name: Build archive
+        shell: bash
         run: |
-          mkdir -p dist
-          cp target/release/ponged.exe dist/pong-cliente-windows-x86_64.exe
-          cp target/release/pong-gateway.exe dist/pong-servidor-windows-x86_64.exe
+          # Replace with the name of your binary
+          binary_name="ponged"
 
-      - name: Subir artefactos
-        uses: actions/upload-artifact@v4
+          dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
+          mkdir "$dirname"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname"
+          else
+            mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
+          fi
+
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "$dirname.zip" "$dirname"
+            echo "ASSET=$dirname.zip" >> $GITHUB_ENV
+          else
+            tar -czf "$dirname.tar.gz" "$dirname"
+            echo "ASSET=$dirname.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
         with:
-          name: binarios-${{ matrix.nombre }}
-          path: dist/
-
-  release:
-    name: Publicar release
-    needs: compilacion
-    runs-on: ubuntu-latest
-    steps:
-      - name: Obtener codigo
-        uses: actions/checkout@v4
-
-      - name: Descargar artefactos
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-
-      - name: Crear tag y release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.version }}
-          target_commitish: ${{ github.sha }}
-          name: "Release ${{ github.event.inputs.version }}"
-          body: ${{ github.event.inputs.descripcion }}
-          files: dist/**/*
+          files: |
+            ${{ env.ASSET }}
