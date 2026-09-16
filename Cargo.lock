@@ -5473,13 +5473,14 @@ dependencies = [
 
 [[package]]
 name = "ponged"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
  "cbor4ii",
  "libp2p",
  "rusqlite",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -6200,6 +6201,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.151"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -8108,3 +8122,9 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"

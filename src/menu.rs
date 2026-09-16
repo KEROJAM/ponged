@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 
 use bevy::asset::AssetId;
 use bevy::prelude::*;
 use bevy::text::{EditableText, Font};
-use serde_json::{from_str, Value};
+use serde_json::from_str;
 use bevy::input_focus::AutoFocus;
 use libp2p::core::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
@@ -61,11 +62,20 @@ impl Default for Username {
     }
 }
 
-/// List of known gateway addresses that the client may connect to.
+/// A server entry with its address and measured ping latency.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServerEntry {
+    pub address: String,
+    #[serde(default)]
+    pub ping_ms: Option<u64>,
+}
+
+/// List of known gateway addresses that the client may connect to,
+/// sorted by ping latency (lowest first).
 /// This can be overridden by the `PONG_GATEWAY` environment variable or by
 /// placing a `gateways.json` file in the project's `assets` directory.
 #[derive(Resource, Default)]
-pub struct GatewayAddresses(pub Vec<String>);
+pub struct GatewayAddresses(pub Vec<ServerEntry>);
 
 /// Display names learned from connected peers via `Request::Hello { name }`.
 ///
@@ -313,22 +323,23 @@ pub fn load_settings(mut commands: Commands, mut history: ResMut<MatchHistory>) 
 
     // Load gateway addresses from assets/gateways.json, env var, or default.
     let gw_addr = load_gateway_addresses();
-    commands.insert_resource(GatewayAddresses(gw_addr.clone()));
-    info!("Loaded {} gateway address(es)", gw_addr.len());
+    let count = gw_addr.len();
+    commands.insert_resource(GatewayAddresses(gw_addr));
+    info!("Loaded {} gateway address(es)", count);
 }
 
 /// Tries to load gateway addresses in order of precedence:
-/// 1. assets/gateways.json file
+/// 1. assets/gateways.json file (with ping-based sorting)
 /// 2. PONG_GATEWAY environment variable (comma‑separated)
 /// 3. a single default address.
-fn load_gateway_addresses() -> Vec<String> {
+pub fn load_gateway_addresses() -> Vec<ServerEntry> {
     // 1) Try reading the JSON file.
     let path = std::path::Path::new("assets/gateways.json");
     if path.exists() {
         if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(values) = from_str::<Vec<String>>(&content) {
+            if let Ok(values) = from_str::<Vec<ServerEntry>>(&content) {
                 if !values.is_empty() {
-                    return values;
+                    return sort_servers_by_ping(values);
                 }
             }
         }
@@ -336,11 +347,108 @@ fn load_gateway_addresses() -> Vec<String> {
     // 2) Fall back to environment variable.
     if let Ok(env) = std::env::var("PONG_GATEWAY") {
         if !env.trim().is_empty() {
-            return env.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            return env
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(|address| ServerEntry {
+                    address,
+                    ping_ms: None,
+                })
+                .collect();
         }
     }
     // 3) Default fallback.
-    vec![GATEWAY_DEFAULT_ADDR.to_string()]
+    vec![ServerEntry {
+        address: GATEWAY_DEFAULT_ADDR.to_string(),
+        ping_ms: None,
+    }]
+}
+
+/// Measures ping latency to each server and returns a sorted list
+/// (lowest latency first). Servers with unmeasured ping are placed at the end.
+fn sort_servers_by_ping(mut servers: Vec<ServerEntry>) -> Vec<ServerEntry> {
+    for entry in &mut servers {
+        entry.ping_ms = measure_ping(&entry.address);
+    }
+    servers.sort_by(|a, b| {
+        let a_ping = a.ping_ms.unwrap_or(u64::MAX);
+        let b_ping = b.ping_ms.unwrap_or(u64::MAX);
+        a_ping.cmp(&b_ping)
+    });
+    servers
+}
+
+/// Attempts to measure the round-trip TCP connection time to a server
+/// address, returning the latency in milliseconds.
+fn measure_ping(addr_str: &str) -> Option<u64> {
+    let addr: Multiaddr = addr_str.parse().ok()?;
+    let socket = multiaddr_to_socket(&addr)?;
+    let start = std::time::Instant::now();
+    if std::net::TcpStream::connect(&socket).is_ok() {
+        Some(start.elapsed().as_millis() as u64)
+    } else {
+        None
+    }
+}
+
+/// Converts a libp2p Multiaddr to a `std::net::SocketAddr` for TCP pinging.
+fn multiaddr_to_socket(addr: &Multiaddr) -> Option<SocketAddr> {
+    let mut ip: Option<std::net::IpAddr> = None;
+    let mut port: Option<u16> = None;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::Ip4(a) => ip = Some(a.into()),
+            Protocol::Ip6(a) => ip = Some(a.into()),
+            Protocol::Tcp(p) => port = Some(p),
+            _ => {}
+        }
+    }
+    match (ip, port) {
+        (Some(ip), Some(port)) => Some(SocketAddr::new(ip, port)),
+        _ => None,
+    }
+}
+
+/// Refreshes ping measurements for all gateway addresses and re-sorts them.
+/// Called periodically to keep the server list ordered by current latency.
+pub fn refresh_server_pings(addrs: &mut GatewayAddresses) {
+    for entry in &mut addrs.0 {
+        entry.ping_ms = measure_ping(&entry.address);
+    }
+    addrs.0.sort_by(|a, b| {
+        let a_ping = a.ping_ms.unwrap_or(u64::MAX);
+        let b_ping = b.ping_ms.unwrap_or(u64::MAX);
+        a_ping.cmp(&b_ping)
+    });
+}
+
+/// How often we re-measure server ping latency (30 seconds).
+const SERVER_PING_INTERVAL_SECS: f32 = 30.0;
+
+/// Timer for periodic server ping refresh.
+#[derive(Resource)]
+pub struct ServerPingTimer(Timer);
+
+impl Default for ServerPingTimer {
+    fn default() -> Self {
+        ServerPingTimer(Timer::from_seconds(
+            SERVER_PING_INTERVAL_SECS,
+            TimerMode::Repeating,
+        ))
+    }
+}
+
+/// Periodically refreshes server ping measurements and re-sorts the list.
+pub fn update_server_ping_refresh(
+    time: Res<Time>,
+    mut timer: ResMut<ServerPingTimer>,
+    mut gateway_addrs: ResMut<GatewayAddresses>,
+) {
+    timer.0.tick(time.delta());
+    if timer.0.just_finished() {
+        refresh_server_pings(&mut gateway_addrs);
+    }
 }
 
 /// Replaces Bevy's stock default font (a small Fira Mono subset that lacks the
@@ -1380,7 +1488,7 @@ fn start_search(
     let addr_str = (*gw_addrs)
         .0
         .first()
-        .cloned()
+        .map(|e| e.address.clone())
         .unwrap_or_else(|| GATEWAY_DEFAULT_ADDR.to_string());
     let addr: Multiaddr = addr_str.parse().unwrap_or_else(|e| {
         warn!("Bad gateway address: {e}");

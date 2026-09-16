@@ -462,6 +462,7 @@ fn main() {
         .init_resource::<networking_demo::IsHost>()
         .init_resource::<networking_demo::SnapshotSeq>()
         .init_resource::<networking::GatewayState>()
+        .init_resource::<menu::ServerPingTimer>()
         .init_resource::<menu::Username>()
         .init_resource::<menu::LocalPeerId>()
         .init_resource::<menu::Opponent>()
@@ -512,6 +513,10 @@ fn main() {
         .add_systems(
             Update,
             menu::update_elo_bar.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
+            menu::update_server_ping_refresh.run_if(in_state(AppState::Menu)),
         )
         .add_systems(
             Update,
