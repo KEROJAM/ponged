@@ -34,6 +34,7 @@ lto = "thin"
 bevy = { version = "0.19.1", default-features = false, features = ["2d", "ui", "x11"] }
 libp2p = { version = "0.56.0", features = ["tcp", "tokio", "noise", "yamux", "mdns", "identify", "ping", "macros", "request-response", "cbor", "rendezvous", "kad", "relay", "dcutr", "dns"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 

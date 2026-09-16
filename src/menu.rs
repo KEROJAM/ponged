@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use bevy::asset::AssetId;
 use bevy::prelude::*;
 use bevy::text::{EditableText, Font};
+use serde_json::{from_str, Value};
 use bevy::input_focus::AutoFocus;
 use libp2p::core::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
@@ -60,7 +61,16 @@ impl Default for Username {
     }
 }
 
+/// List of known gateway addresses that the client may connect to.
+/// This can be overridden by the `PONG_GATEWAY` environment variable or by
+/// placing a `gateways.json` file in the project's `assets` directory.
+#[derive(Resource, Default)]
+pub struct GatewayAddresses(pub Vec<String>);
+
 /// Display names learned from connected peers via `Request::Hello { name }`.
+///
+/// Peers send their name over the `Hello` request, and these names are
+/// collected in a resource for display in the menu.
 #[derive(Resource, Default)]
 pub struct PeerNames(pub HashMap<PeerId, String>);
 
@@ -300,6 +310,37 @@ pub fn load_settings(mut commands: Commands, mut history: ResMut<MatchHistory>) 
     commands.insert_resource(Username(username));
     commands.insert_resource(NeedsOnboarding(stored.is_none()));
     info!("Local username: {:?}", stored);
+
+    // Load gateway addresses from assets/gateways.json, env var, or default.
+    let gw_addr = load_gateway_addresses();
+    commands.insert_resource(GatewayAddresses(gw_addr.clone()));
+    info!("Loaded {} gateway address(es)", gw_addr.len());
+}
+
+/// Tries to load gateway addresses in order of precedence:
+/// 1. assets/gateways.json file
+/// 2. PONG_GATEWAY environment variable (comma‑separated)
+/// 3. a single default address.
+fn load_gateway_addresses() -> Vec<String> {
+    // 1) Try reading the JSON file.
+    let path = std::path::Path::new("assets/gateways.json");
+    if path.exists() {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(values) = from_str::<Vec<String>>(&content) {
+                if !values.is_empty() {
+                    return values;
+                }
+            }
+        }
+    }
+    // 2) Fall back to environment variable.
+    if let Ok(env) = std::env::var("PONG_GATEWAY") {
+        if !env.trim().is_empty() {
+            return env.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        }
+    }
+    // 3) Default fallback.
+    vec![GATEWAY_DEFAULT_ADDR.to_string()]
 }
 
 /// Replaces Bevy's stock default font (a small Fira Mono subset that lacks the
@@ -1280,6 +1321,7 @@ pub fn update_buttons(
     channels: Res<NetChannels>,
     mut options_open: ResMut<OptionsOpen>,
     mut pre: ResMut<PreMatch>,
+    gw_addrs: Res<GatewayAddresses>,
     mut exit: MessageWriter<AppExit>,
 ) {
     for (interaction, action, children, mut bg) in &mut buttons {
@@ -1312,7 +1354,7 @@ pub fn update_buttons(
                 } else {
                     search.0 = true;
                     pre.rejected.clear();
-                    start_search(&mut gateway, &channels, &username, &peers, &mut pre);
+                    start_search(&mut gateway, &channels, &username, &peers, &mut pre, &gw_addrs);
                     info!("Searching for opponents (LAN + WAN)");
                 }
             }
@@ -1333,14 +1375,16 @@ fn start_search(
     username: &Username,
     peers: &Peers,
     pre: &mut PreMatch,
+    gw_addrs: &Res<GatewayAddresses>,
 ) {
-    let gw_addr =
-        std::env::var("PONG_GATEWAY").unwrap_or_else(|_| GATEWAY_DEFAULT_ADDR.to_string());
-    let addr: Multiaddr = gw_addr.parse().unwrap_or_else(|e| {
-        warn!("Bad PONG_GATEWAY address: {e}");
-        GATEWAY_DEFAULT_ADDR
-            .parse()
-            .expect("default address is valid")
+    let addr_str = (*gw_addrs)
+        .0
+        .first()
+        .cloned()
+        .unwrap_or_else(|| GATEWAY_DEFAULT_ADDR.to_string());
+    let addr: Multiaddr = addr_str.parse().unwrap_or_else(|e| {
+        warn!("Bad gateway address: {e}");
+        GATEWAY_DEFAULT_ADDR.parse().expect("default address is valid")
     });
 
     match (gateway.peer, gateway.connected, gateway.reserved) {
