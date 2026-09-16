@@ -442,23 +442,17 @@ pub fn load_settings(mut commands: Commands, mut history: ResMut<MatchHistory>) 
     info!("Loaded {} gateway address(es)", count);
 }
 
+/// Gateway addresses compiled into the binary from assets/gateways.json.
+/// Release binaries always have the production gateways baked in.
+const GATEWAYS_JSON: &str = include_str!("../assets/gateways.json");
+
 /// Tries to load gateway addresses in order of precedence:
-/// 1. assets/gateways.json file (with ping-based sorting)
-/// 2. PONG_GATEWAY environment variable (comma‑separated)
-/// 3. a single default address.
+/// 1. PONG_GATEWAY environment variable (comma‑separated, for overrides)
+/// 2. assets/gateways.json file on disk (for development)
+/// 3. Compiled-in addresses from GATEWAYS_JSON (for release binaries)
+/// 4. a single default address.
 pub fn load_gateway_addresses() -> Vec<ServerEntry> {
-    // 1) Try reading the JSON file.
-    let path = std::path::Path::new("assets/gateways.json");
-    if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(values) = from_str::<Vec<ServerEntry>>(&content) {
-                if !values.is_empty() {
-                    return sort_servers_by_ping(values);
-                }
-            }
-        }
-    }
-    // 2) Fall back to environment variable.
+    // 1) Environment variable override.
     if let Ok(env) = std::env::var("PONG_GATEWAY") {
         if !env.trim().is_empty() {
             return env
@@ -472,7 +466,24 @@ pub fn load_gateway_addresses() -> Vec<ServerEntry> {
                 .collect();
         }
     }
-    // 3) Default fallback.
+    // 2) Disk file (for development: change addresses without recompiling).
+    let path = std::path::Path::new("assets/gateways.json");
+    if path.exists() {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(values) = from_str::<Vec<ServerEntry>>(&content) {
+                if !values.is_empty() {
+                    return sort_servers_by_ping(values);
+                }
+            }
+        }
+    }
+    // 3) Compiled-in addresses (works in release binaries without the file).
+    if let Ok(values) = from_str::<Vec<ServerEntry>>(GATEWAYS_JSON) {
+        if !values.is_empty() {
+            return sort_servers_by_ping(values);
+        }
+    }
+    // 4) Hardcoded fallback.
     vec![ServerEntry {
         address: GATEWAY_DEFAULT_ADDR.to_string(),
         ping_ms: None,
