@@ -504,6 +504,10 @@ fn main() {
         )
         .add_systems(
             Update,
+            menu::update_settings_controls.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
             menu::update_onboarding.run_if(in_state(AppState::Menu)),
         )
         .add_systems(
@@ -613,6 +617,7 @@ fn main() {
         .add_observer(menu::on_gateway_request)
         .add_observer(menu::on_rendezvous_discovered)
         .add_observer(menu::on_game_request)
+        .add_observer(menu::on_chat_message)
         .add_observer(menu::on_peer_disconnected)
         .run();
 }
@@ -755,6 +760,10 @@ mod networking_demo {
                 }
                 Request::MigrateHost(_) | Request::HostMigrated => {
                     // Host migration coordination, handled by `menu::on_game_request`.
+                }
+                Request::Chat { text } => {
+                    // Chat messages are handled by `menu::on_chat_message`.
+                    debug!("Chat from {peer}: {text}");
                 }
             }
         }

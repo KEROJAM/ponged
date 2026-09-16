@@ -80,6 +80,11 @@ pub enum Request {
     /// The former guest acknowledges it has taken over as the host (used with
     /// [`Request::MigrateHost`]).
     HostMigrated,
+    /// A chat message sent between peers in the lobby.
+    Chat {
+        #[serde(default)]
+        text: String,
+    },
 }
 
 /// Responses to the above.

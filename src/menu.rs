@@ -112,17 +112,35 @@ impl Default for UpdateTimer {
 
 /// Chat message sent between players.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ChatMessage {
-    pub from: PeerId,
+    pub from_name: String,
     pub text: String,
+    pub is_local: bool,
 }
 
 /// Buffer of recent chat messages displayed in the UI.
-#[derive(Resource, Default)]
-#[allow(dead_code)]
+#[derive(Resource)]
 pub struct ChatBuffer {
     pub messages: Vec<ChatMessage>,
+}
+
+impl Default for ChatBuffer {
+    fn default() -> Self {
+        ChatBuffer {
+            messages: Vec::new(),
+        }
+    }
+}
+
+impl ChatBuffer {
+    const MAX_MESSAGES: usize = 50;
+
+    pub fn push(&mut self, msg: ChatMessage) {
+        if self.messages.len() >= Self::MAX_MESSAGES {
+            self.messages.remove(0);
+        }
+        self.messages.push(msg);
+    }
 }
 
 /// Ping history entries for server latency tracking.
@@ -374,6 +392,46 @@ pub enum OptionsButton {
     Save,
     Back,
 }
+
+// --- Chat UI components ---
+
+#[derive(Component)]
+pub struct ChatRoot;
+#[derive(Component)]
+pub struct ChatMessagesContainer;
+#[derive(Component)]
+pub struct ChatInput;
+#[derive(Component)]
+pub struct ChatSendButton;
+#[derive(Component)]
+pub struct ChatToggleButton;
+#[derive(Component)]
+pub struct ChatMessageLine;
+
+// --- Expanded settings components ---
+
+#[derive(Component)]
+pub struct SettingsPaddleSpeedUp;
+#[derive(Component)]
+pub struct SettingsPaddleSpeedDown;
+#[derive(Component)]
+pub struct SettingsPaddleSpeedLabel;
+#[derive(Component)]
+pub struct SettingsKeyUpButton;
+#[derive(Component)]
+pub struct SettingsKeyDownButton;
+#[derive(Component)]
+pub struct SettingsKeyUpLabel;
+#[derive(Component)]
+pub struct SettingsKeyDownLabel;
+#[derive(Component)]
+pub struct SettingsWindowScaleUp;
+#[derive(Component)]
+pub struct SettingsWindowScaleDown;
+#[derive(Component)]
+pub struct SettingsWindowScaleLabel;
+#[derive(Component)]
+pub struct SettingsVsyncToggle;
 
 /// Loads persisted settings at startup and seeds the username resource.
 pub fn load_settings(mut commands: Commands, mut history: ResMut<MatchHistory>) {
@@ -654,6 +712,7 @@ pub fn spawn_menu(
         ],
     ));
 
+    // --- Settings panel (expanded) ---
     commands.spawn((
         OptionsRoot,
         Node {
@@ -670,8 +729,8 @@ pub fn spawn_menu(
             Node {
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
-                row_gap: px(16.),
-                padding: UiRect::all(px(36.)),
+                row_gap: px(12.),
+                padding: UiRect::all(px(32.)),
                 border: UiRect::all(px(2.)),
                 ..default()
             },
@@ -680,63 +739,241 @@ pub fn spawn_menu(
             children![
                 (
                     Text::new("Opciones"),
-                    TextFont::from_font_size(48.0),
+                    TextFont::from_font_size(42.0),
                     TextColor(Color::WHITE),
                 ),
+                // --- Username ---
                 (
                     Text::new("Tu nombre:"),
-                    TextFont::from_font_size(18.0),
+                    TextFont::from_font_size(16.0),
                     TextColor(DIM),
                 ),
                 (
                     OptionsInput,
                     EditableText::new(username.0.clone()),
-                    TextFont::from_font_size(24.0),
+                    TextFont::from_font_size(22.0),
                     TextColor(Color::WHITE),
                     Node {
                         width: px(260.),
-                        height: px(44.),
+                        height: px(40.),
                         border: UiRect::all(px(2.)),
-                        padding: UiRect::axes(px(10.), px(8.)),
+                        padding: UiRect::axes(px(10.), px(6.)),
                         ..default()
                     },
                     BorderColor::all(Color::WHITE),
                 ),
+                // --- Separator ---
                 (
-                    OptionsButton::Save,
-                    Button,
                     Node {
-                        min_width: px(180.),
-                        padding: UiRect::axes(px(26.), px(10.)),
-                        border: UiRect::all(px(2.)),
+                        width: px(320.),
+                        height: px(1.),
                         ..default()
                     },
-                    BackgroundColor(Color::WHITE),
-                    BorderColor::all(Color::WHITE),
-                    children![(
-                        ButtonText,
-                        Text::new("Guardar"),
-                        TextFont::from_font_size(22.0),
-                        TextColor(Color::BLACK),
-                    )],
+                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.2)),
+                ),
+                // --- Paddle speed ---
+                (
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(12.),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    children![
+                        (
+                            Text::new("Velocidad paleta:"),
+                            TextFont::from_font_size(16.0),
+                            TextColor(DIM),
+                        ),
+                        settings_button(SettingsPaddleSpeedDown, "-"),
+                        (
+                            SettingsPaddleSpeedLabel,
+                            Text::new("5.0"),
+                            TextFont::from_font_size(18.0),
+                            TextColor(Color::WHITE),
+                        ),
+                        settings_button(SettingsPaddleSpeedUp, "+"),
+                    ],
+                ),
+                // --- Keybinds ---
+                (
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(12.),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    children![
+                        (
+                            Text::new("Mover arriba:"),
+                            TextFont::from_font_size(16.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            SettingsKeyUpButton,
+                            Button,
+                            Node {
+                                min_width: px(100.),
+                                padding: UiRect::axes(px(12.), px(6.)),
+                                border: UiRect::all(px(2.)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::NONE),
+                            BorderColor::all(Color::WHITE),
+                            children![(
+                                SettingsKeyUpLabel,
+                                Text::new("ArrowUp"),
+                                TextFont::from_font_size(16.0),
+                                TextColor(Color::WHITE),
+                            )],
+                        ),
+                    ],
                 ),
                 (
-                    OptionsButton::Back,
-                    Button,
                     Node {
-                        min_width: px(180.),
-                        padding: UiRect::axes(px(26.), px(10.)),
-                        border: UiRect::all(px(2.)),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(12.),
+                        align_items: AlignItems::Center,
                         ..default()
                     },
-                    BackgroundColor(Color::NONE),
-                    BorderColor::all(Color::WHITE),
-                    children![(
-                        ButtonText,
-                        Text::new("Volver"),
-                        TextFont::from_font_size(22.0),
-                        TextColor(Color::WHITE),
-                    )],
+                    children![
+                        (
+                            Text::new("Mover abajo:"),
+                            TextFont::from_font_size(16.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            SettingsKeyDownButton,
+                            Button,
+                            Node {
+                                min_width: px(100.),
+                                padding: UiRect::axes(px(12.), px(6.)),
+                                border: UiRect::all(px(2.)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::NONE),
+                            BorderColor::all(Color::WHITE),
+                            children![(
+                                SettingsKeyDownLabel,
+                                Text::new("ArrowDown"),
+                                TextFont::from_font_size(16.0),
+                                TextColor(Color::WHITE),
+                            )],
+                        ),
+                    ],
+                ),
+                // --- Window scale ---
+                (
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(12.),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    children![
+                        (
+                            Text::new("Escala ventana:"),
+                            TextFont::from_font_size(16.0),
+                            TextColor(DIM),
+                        ),
+                        settings_button(SettingsWindowScaleDown, "-"),
+                        (
+                            SettingsWindowScaleLabel,
+                            Text::new("1.0x"),
+                            TextFont::from_font_size(18.0),
+                            TextColor(Color::WHITE),
+                        ),
+                        settings_button(SettingsWindowScaleUp, "+"),
+                    ],
+                ),
+                // --- Vsync ---
+                (
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(12.),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    children![
+                        (
+                            Text::new("VSync:"),
+                            TextFont::from_font_size(16.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            SettingsVsyncToggle,
+                            Button,
+                            Node {
+                                min_width: px(80.),
+                                padding: UiRect::axes(px(12.), px(6.)),
+                                border: UiRect::all(px(2.)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::NONE),
+                            BorderColor::all(Color::WHITE),
+                            children![(
+                                ButtonText,
+                                Text::new("ON"),
+                                TextFont::from_font_size(16.0),
+                                TextColor(Color::WHITE),
+                            )],
+                        ),
+                    ],
+                ),
+                // --- Separator ---
+                (
+                    Node {
+                        width: px(320.),
+                        height: px(1.),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.2)),
+                ),
+                // --- Buttons ---
+                (
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(16.),
+                        ..default()
+                    },
+                    children![
+                        (
+                            OptionsButton::Save,
+                            Button,
+                            Node {
+                                min_width: px(160.),
+                                padding: UiRect::axes(px(26.), px(10.)),
+                                border: UiRect::all(px(2.)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::WHITE),
+                            BorderColor::all(Color::WHITE),
+                            children![(
+                                ButtonText,
+                                Text::new("Guardar"),
+                                TextFont::from_font_size(22.0),
+                                TextColor(Color::BLACK),
+                            )],
+                        ),
+                        (
+                            OptionsButton::Back,
+                            Button,
+                            Node {
+                                min_width: px(160.),
+                                padding: UiRect::axes(px(26.), px(10.)),
+                                border: UiRect::all(px(2.)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::NONE),
+                            BorderColor::all(Color::WHITE),
+                            children![(
+                                ButtonText,
+                                Text::new("Volver"),
+                                TextFont::from_font_size(22.0),
+                                TextColor(Color::WHITE),
+                            )],
+                        ),
+                    ],
                 ),
             ],
         ),],
@@ -858,6 +1095,102 @@ pub fn spawn_menu(
             ],
         ),],
     ));
+
+    // --- Chat panel (right side of lobby) ---
+    commands.spawn((
+        ChatRoot,
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(16.),
+            top: px(16.),
+            bottom: px(16.),
+            width: px(320.),
+            flex_direction: FlexDirection::Column,
+            border: UiRect::all(px(2.)),
+            row_gap: px(0.),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.05, 0.05, 0.1, 0.85)),
+        BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.3)),
+        children![
+            // Header
+            (
+                Node {
+                    width: percent(100.),
+                    padding: UiRect::axes(px(12.), px(8.)),
+                    justify_content: JustifyContent::SpaceBetween,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.15, 0.15, 0.2, 0.9)),
+                children![(
+                    Text::new("Chat"),
+                    TextFont::from_font_size(18.0),
+                    TextColor(Color::WHITE),
+                )],
+            ),
+            // Messages area
+            (
+                ChatMessagesContainer,
+                Node {
+                    width: percent(100.),
+                    flex_grow: 1.0,
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::axes(px(8.), px(4.)),
+                    row_gap: px(2.),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+            ),
+            // Input row
+            (
+                Node {
+                    width: percent(100.),
+                    flex_direction: FlexDirection::Row,
+                    padding: UiRect::axes(px(8.), px(8.)),
+                    column_gap: px(6.),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                children![
+                    (
+                        ChatInput,
+                        EditableText::new("".to_string()),
+                        TextFont::from_font_size(14.0),
+                        TextColor(Color::WHITE),
+                        Node {
+                            flex_grow: 1.0,
+                            height: px(32.),
+                            border: UiRect::all(px(1.)),
+                            padding: UiRect::axes(px(8.), px(4.)),
+                            ..default()
+                        },
+                        BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.4)),
+                    ),
+                    (
+                        ChatSendButton,
+                        Button,
+                        Node {
+                            width: px(60.),
+                            height: px(32.),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            border: UiRect::all(px(1.)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.3, 0.5, 0.8, 0.8)),
+                        BorderColor::all(Color::srgba(0.4, 0.6, 0.9, 1.0)),
+                        children![(
+                            ButtonText,
+                            Text::new("Enviar"),
+                            TextFont::from_font_size(14.0),
+                            TextColor(Color::WHITE),
+                        )],
+                    ),
+                ],
+            ),
+        ],
+    ));
 }
 
 /// Width of each staircase button: "Jugar" is the longest and the rest step
@@ -886,6 +1219,30 @@ fn menu_button(action: MenuButton, label: &str) -> impl Bundle {
             ButtonText,
             Text::new(label),
             TextFont::from_font_size(26.0),
+            TextColor(Color::WHITE),
+        )],
+    )
+}
+
+/// A small settings button (+ / -).
+fn settings_button(action: impl Component, label: &str) -> impl Bundle {
+    (
+        action,
+        Button,
+        Node {
+            width: px(36.),
+            height: px(32.),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border: UiRect::all(px(2.)),
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+        BorderColor::all(Color::WHITE),
+        children![(
+            ButtonText,
+            Text::new(label),
+            TextFont::from_font_size(20.0),
             TextColor(Color::WHITE),
         )],
     )
@@ -924,6 +1281,7 @@ pub fn despawn_menu(
             With<OptionsRoot>,
             With<OnboardingRoot>,
             With<PreMatchRoot>,
+            With<ChatRoot>,
             With<MenuField>,
             With<NodeHub>,
             With<NodeHubLabel>,
@@ -1403,12 +1761,136 @@ fn fetch_latest_version() -> Result<(String, String), Box<dyn std::error::Error>
 
 // --- Chat system -----------------------------------------------------------
 
-/// Handles chat message display in the menu.
+/// Sends a chat message to all connected peers.
+pub fn send_chat_message(
+    text: String,
+    peers: &Peers,
+    channels: &NetChannels,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    for peer in &peers.0 {
+        let _ = channels.commands.send(NetCommand::SendRequest {
+            peer: *peer,
+            request: GameRequest::Chat { text: text.clone() },
+        });
+    }
+    info!("Chat sent: {}", text);
+}
+
+/// Handles chat message display in the menu: processes input, sends messages,
+/// and updates the message list UI.
+#[allow(clippy::too_many_arguments)]
 pub fn update_chat(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut chat_buffer: ResMut<ChatBuffer>,
+    username: Res<Username>,
+    peers: Res<Peers>,
+    channels: Res<NetChannels>,
+    mut chat_input: Single<&mut EditableText, With<ChatInput>>,
+    send_button: Query<&Interaction, With<ChatSendButton>>,
+    mut messages_container: Query<
+        (Entity, &Children),
+        (With<ChatMessagesContainer>, Without<ChatInput>),
+    >,
+    mut message_texts: Query<&mut Text, With<ChatMessageLine>>,
+    mut commands: Commands,
 ) {
-    let _ = (keyboard_input, chat_buffer);
+    // Check if send was clicked or Enter pressed
+    let mut should_send = false;
+    for interaction in &send_button {
+        if *interaction == Interaction::Pressed {
+            should_send = true;
+        }
+    }
+    if keyboard_input.just_pressed(KeyCode::Enter) {
+        should_send = true;
+    }
+
+    if should_send {
+        let text = chat_input.value().to_string().trim().to_string();
+        if !text.is_empty() {
+            // Add to local buffer
+            chat_buffer.push(ChatMessage {
+                from_name: username.0.clone(),
+                text: text.clone(),
+                is_local: true,
+            });
+            // Send to all peers
+            send_chat_message(text, &peers, &channels);
+            // Clear input
+            **chat_input = EditableText::new(String::new());
+        }
+    }
+
+    // Sync message display
+    if let Ok((container_entity, children)) = messages_container.single_mut() {
+        let expected = chat_buffer.messages.len();
+        let current = children.len();
+
+        // Remove excess text entities if buffer shrunk
+        if current > expected {
+            for entity in children.iter().skip(expected) {
+                commands.entity(entity).despawn();
+            }
+        }
+
+        // Update or create message text entities
+        for (i, msg) in chat_buffer.messages.iter().enumerate() {
+            if i < current {
+                // Update existing
+                if let Ok(mut text) = message_texts.get_mut(children[i]) {
+                    let prefix = format!("{}: ", msg.from_name);
+                    let new_text = format!("{prefix}{}", msg.text);
+                    if text.0 != new_text {
+                        text.0 = new_text;
+                    }
+                }
+            } else {
+                // Spawn new message entity
+                let prefix = format!("{}: ", msg.from_name);
+                let full_text = format!("{}{}", prefix, msg.text);
+                let color = if msg.is_local {
+                    Color::srgb(0.6, 0.85, 1.0)
+                } else {
+                    Color::srgba(0.9, 0.9, 0.95, 1.0)
+                };
+                commands.entity(container_entity).with_children(|parent| {
+                    parent.spawn((
+                        ChatMessageLine,
+                        Text::new(full_text),
+                        TextFont::from_font_size(13.0),
+                        TextColor(color),
+                        Node {
+                            width: percent(100.),
+                            ..default()
+                        },
+                    ));
+                });
+            }
+        }
+    }
+}
+
+/// Handles incoming chat messages from peers: adds them to the ChatBuffer.
+pub fn on_chat_message(
+    ev: On<NetEvent>,
+    names: Res<PeerNames>,
+    mut chat_buffer: ResMut<ChatBuffer>,
+) {
+    let NetEvent::GameRequest { peer, request } = ev.event() else {
+        return;
+    };
+    if let GameRequest::Chat { text } = request {
+        let from_name = names.0.get(peer).cloned().unwrap_or_else(|| short_peer(*peer));
+        chat_buffer.push(ChatMessage {
+            from_name: from_name.clone(),
+            text: text.clone(),
+            is_local: false,
+        });
+        info!("Chat from {from_name}: {text}");
+    }
 }
 
 // --- Ping history system ---------------------------------------------------
@@ -1931,6 +2413,101 @@ pub fn update_options(
                 options_open.0 = false;
             }
         }
+    }
+}
+
+/// Handles settings controls: paddle speed, keybinds, window scale, vsync.
+#[allow(clippy::too_many_arguments)]
+pub fn update_settings_controls(
+    options_open: Res<OptionsOpen>,
+    mut config: ResMut<Config>,
+    speed_up: Query<&Interaction, (With<SettingsPaddleSpeedUp>, Without<SettingsPaddleSpeedDown>)>,
+    speed_down: Query<&Interaction, (With<SettingsPaddleSpeedDown>, Without<SettingsPaddleSpeedUp>)>,
+    mut speed_label: Single<&mut Text, With<SettingsPaddleSpeedLabel>>,
+    key_up_btn: Query<&Interaction, With<SettingsKeyUpButton>>,
+    key_down_btn: Query<&Interaction, With<SettingsKeyDownButton>>,
+    mut key_up_label: Single<&mut Text, With<SettingsKeyUpLabel>>,
+    mut key_down_label: Single<&mut Text, With<SettingsKeyDownLabel>>,
+    scale_up: Query<&Interaction, (With<SettingsWindowScaleUp>, Without<SettingsWindowScaleDown>)>,
+    scale_down: Query<&Interaction, (With<SettingsWindowScaleDown>, Without<SettingsWindowScaleUp>)>,
+    mut scale_label: Single<&mut Text, With<SettingsWindowScaleLabel>>,
+    vsync_btn: Query<&Interaction, With<SettingsVsyncToggle>>,
+    mut vsync_label: Single<&mut Text, (With<ButtonText>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsPaddleSpeedLabel>, Without<SettingsWindowScaleLabel>)>,
+) {
+    if !options_open.0 {
+        return;
+    }
+
+    // Update display labels
+    speed_label.0 = format!("{:.1}", config.paddle_speed);
+    scale_label.0 = format!("{:.1}x", config.window_scale);
+    key_up_label.0 = key_code_to_short(config.key_up);
+    key_down_label.0 = key_code_to_short(config.key_down);
+    vsync_label.0 = if config.vsync { "ON" } else { "OFF" }.to_string();
+
+    // Handle paddle speed +/-
+    if let Ok(i) = speed_up.single() {
+        if *i == Interaction::Pressed {
+            config.paddle_speed = (config.paddle_speed + 0.5).min(15.0);
+        }
+    }
+    if let Ok(i) = speed_down.single() {
+        if *i == Interaction::Pressed {
+            config.paddle_speed = (config.paddle_speed - 0.5).max(1.0);
+        }
+    }
+
+    // Handle keybind buttons: cycle through available keys
+    if let Ok(i) = key_up_btn.single() {
+        if *i == Interaction::Pressed {
+            config.key_up = cycle_keycode(config.key_up);
+        }
+    }
+    if let Ok(i) = key_down_btn.single() {
+        if *i == Interaction::Pressed {
+            config.key_down = cycle_keycode(config.key_down);
+        }
+    }
+
+    // Handle window scale +/-
+    if let Ok(i) = scale_up.single() {
+        if *i == Interaction::Pressed {
+            config.window_scale = (config.window_scale + 0.25).min(3.0);
+        }
+    }
+    if let Ok(i) = scale_down.single() {
+        if *i == Interaction::Pressed {
+            config.window_scale = (config.window_scale - 0.25).max(0.5);
+        }
+    }
+
+    // Handle vsync toggle
+    if let Ok(i) = vsync_btn.single() {
+        if *i == Interaction::Pressed {
+            config.vsync = !config.vsync;
+        }
+    }
+}
+
+/// Cycle through available keybind options.
+fn cycle_keycode(current: KeyCode) -> KeyCode {
+    match current {
+        KeyCode::ArrowUp => KeyCode::KeyW,
+        KeyCode::KeyW => KeyCode::ArrowUp,
+        KeyCode::ArrowDown => KeyCode::KeyS,
+        KeyCode::KeyS => KeyCode::ArrowDown,
+        _ => KeyCode::ArrowUp,
+    }
+}
+
+/// Short display name for a keycode.
+fn key_code_to_short(kc: KeyCode) -> String {
+    match kc {
+        KeyCode::ArrowUp => "ArrowUp".to_string(),
+        KeyCode::ArrowDown => "ArrowDown".to_string(),
+        KeyCode::KeyW => "W".to_string(),
+        KeyCode::KeyS => "S".to_string(),
+        _ => "?".to_string(),
     }
 }
 
