@@ -43,11 +43,23 @@ jobs:
       - name: Compilar binarios estaticos musl (Linux)
         if: runner.os == 'Linux'
         run: |
-          GATEWAY=$(nix build .#pong-gateway --no-link --print-out-paths)
+          nix build .#pong-client --no-link --print-out-paths
+          nix build .#pong-gateway --no-link --print-out-paths
           CLIENT=$(nix build .#pong-client --no-link --print-out-paths)
+          GATEWAY=$(nix build .#pong-gateway --no-link --print-out-paths)
           mkdir -p dist
-          cp "$GATEWAY/bin/pong-gateway" dist/pong-servidor-linux-x86_64
           cp "$CLIENT/bin/ponged" dist/pong-cliente-linux-x86_64
+          cp "$GATEWAY/bin/pong-gateway" dist/pong-servidor-linux-x86_64
+          # Use patchelf to fix RPATH so the binary finds shared libs
+          # at runtime even when copied out of the Nix store.
+          sudo apt-get update -y
+          sudo apt-get install -y patchelf
+          CLIENT_LIBS="$CLIENT/lib"
+          patchelf --set-rpath "$CLIENT_LIBS" dist/pong-cliente-linux-x86_64
+          GATEWAY_LIBS="$GATEWAY/lib"
+          patchelf --set-rpath "$GATEWAY_LIBS" dist/pong-servidor-linux-x86_64
+          cp -r "$CLIENT/lib/"*.so* dist/ 2>/dev/null || true
+          cp -r "$GATEWAY/lib/"*.so* dist/ 2>/dev/null || true
 
       - name: Instalar Rust stable (Windows)
         if: runner.os == 'Windows'
