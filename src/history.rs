@@ -3,10 +3,14 @@
 //! Purely client-side persistence backed by SQLite (rusqlite). The result of
 //! every finished match is written when we leave the `Playing` state, and the
 //! lobby (M5) reads it back to show a win/loss record and recent games.
+//! The database is stored in the platform's application data directory
+//! (~/.local/share/ponged/ on Linux, %APPDATA%/ponged/ on Windows) so it
+//! persists regardless of the working directory.
 
 use std::sync::Mutex;
 
 use bevy::prelude::*;
+use dirs::data_local_dir;
 use rusqlite::{Connection, params};
 
 use crate::Score;
@@ -50,11 +54,21 @@ pub struct MatchHistory {
 
 
 impl MatchHistory {
+    fn db_path() -> String {
+        let dir = data_local_dir()
+            .map(|p| p.join("ponged"))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        std::fs::create_dir_all(&dir).unwrap_or_default();
+        dir.join("pong_history.sqlite")
+            .to_string_lossy()
+            .to_string()
+    }
+
     pub fn ensure_open(&mut self) {
         if self.db.is_some() {
             return;
         }
-        let Ok(conn) = Connection::open("pong_history.sqlite") else {
+        let Ok(conn) = Connection::open(Self::db_path()) else {
             warn!("Could not open local match history database");
             return;
         };
