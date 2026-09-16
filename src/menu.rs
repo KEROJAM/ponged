@@ -409,13 +409,6 @@ pub struct ChatToggleButton;
 pub struct ChatMessageLine;
 
 // --- Expanded settings components ---
-
-#[derive(Component)]
-pub struct SettingsPaddleSpeedUp;
-#[derive(Component)]
-pub struct SettingsPaddleSpeedDown;
-#[derive(Component)]
-pub struct SettingsPaddleSpeedLabel;
 #[derive(Component)]
 pub struct SettingsKeyUpButton;
 #[derive(Component)]
@@ -770,30 +763,6 @@ pub fn spawn_menu(
                         ..default()
                     },
                     BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.2)),
-                ),
-                // --- Paddle speed ---
-                (
-                    Node {
-                        flex_direction: FlexDirection::Row,
-                        column_gap: px(12.),
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    children![
-                        (
-                            Text::new("Velocidad paleta:"),
-                            TextFont::from_font_size(16.0),
-                            TextColor(DIM),
-                        ),
-                        settings_button(SettingsPaddleSpeedDown, "-"),
-                        (
-                            SettingsPaddleSpeedLabel,
-                            Text::new("5.0"),
-                            TextFont::from_font_size(18.0),
-                            TextColor(Color::WHITE),
-                        ),
-                        settings_button(SettingsPaddleSpeedUp, "+"),
-                    ],
                 ),
                 // --- Keybinds ---
                 (
@@ -2421,9 +2390,6 @@ pub fn update_options(
 pub fn update_settings_controls(
     options_open: Res<OptionsOpen>,
     mut config: ResMut<Config>,
-    speed_up: Query<&Interaction, (With<SettingsPaddleSpeedUp>, Without<SettingsPaddleSpeedDown>)>,
-    speed_down: Query<&Interaction, (With<SettingsPaddleSpeedDown>, Without<SettingsPaddleSpeedUp>)>,
-    mut speed_label: Single<&mut Text, With<SettingsPaddleSpeedLabel>>,
     key_up_btn: Query<&Interaction, With<SettingsKeyUpButton>>,
     key_down_btn: Query<&Interaction, With<SettingsKeyDownButton>>,
     mut key_up_label: Single<&mut Text, With<SettingsKeyUpLabel>>,
@@ -2432,30 +2398,17 @@ pub fn update_settings_controls(
     scale_down: Query<&Interaction, (With<SettingsWindowScaleDown>, Without<SettingsWindowScaleUp>)>,
     mut scale_label: Single<&mut Text, With<SettingsWindowScaleLabel>>,
     vsync_btn: Query<&Interaction, With<SettingsVsyncToggle>>,
-    mut vsync_label: Single<&mut Text, (With<ButtonText>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsPaddleSpeedLabel>, Without<SettingsWindowScaleLabel>)>,
+    mut vsync_label: Single<&mut Text, (With<ButtonText>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsWindowScaleLabel>)>,
 ) {
     if !options_open.0 {
         return;
     }
 
     // Update display labels
-    speed_label.0 = format!("{:.1}", config.paddle_speed);
     scale_label.0 = format!("{:.1}x", config.window_scale);
     key_up_label.0 = key_code_to_short(config.key_up);
     key_down_label.0 = key_code_to_short(config.key_down);
     vsync_label.0 = if config.vsync { "ON" } else { "OFF" }.to_string();
-
-    // Handle paddle speed +/-
-    if let Ok(i) = speed_up.single() {
-        if *i == Interaction::Pressed {
-            config.paddle_speed = (config.paddle_speed + 0.5).min(15.0);
-        }
-    }
-    if let Ok(i) = speed_down.single() {
-        if *i == Interaction::Pressed {
-            config.paddle_speed = (config.paddle_speed - 0.5).max(1.0);
-        }
-    }
 
     // Handle keybind buttons: cycle through available keys
     if let Ok(i) = key_up_btn.single() {
