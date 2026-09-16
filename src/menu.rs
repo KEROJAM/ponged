@@ -4,12 +4,13 @@ use std::net::SocketAddr;
 use bevy::asset::AssetId;
 use bevy::prelude::*;
 use bevy::text::{EditableText, Font};
-use serde_json::from_str;
+use serde_json::{from_str, Value};
 use bevy::input_focus::AutoFocus;
 use libp2p::core::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
 
 use super::AppState;
+use crate::config::Config;
 use crate::history::MatchHistory;
 use crate::networking::{GatewayState, NetChannels, NetCommand, NetEvent, short_peer};
 use crate::networking_demo::{IsHost, Peers, RemoteWorld};
@@ -76,6 +77,68 @@ pub struct ServerEntry {
 /// placing a `gateways.json` file in the project's `assets` directory.
 #[derive(Resource, Default)]
 pub struct GatewayAddresses(pub Vec<ServerEntry>);
+
+/// State for reconnection after a peer disconnects during a match.
+#[derive(Resource, Default)]
+pub struct ReconnectionState {
+    /// The peer we're trying to reconnect to.
+    pub target: Option<PeerId>,
+    /// Remaining seconds before giving up.
+    pub countdown: Option<Timer>,
+    /// Whether a reconnection attempt is in progress.
+    pub active: bool,
+}
+
+/// Latest update information fetched from the GitHub API.
+#[derive(Resource, Default)]
+pub struct UpdateInfo {
+    /// Latest version tag, if available.
+    pub latest_version: Option<String>,
+    /// Whether an update is available.
+    pub available: bool,
+    /// The URL to the release page.
+    pub release_url: Option<String>,
+}
+
+/// Resource indicating an update check should be performed.
+#[derive(Resource)]
+pub struct UpdateTimer(Timer);
+
+impl Default for UpdateTimer {
+    fn default() -> Self {
+        UpdateTimer(Timer::from_seconds(300.0, TimerMode::Once))
+    }
+}
+
+/// Chat message sent between players.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ChatMessage {
+    pub from: PeerId,
+    pub text: String,
+}
+
+/// Buffer of recent chat messages displayed in the UI.
+#[derive(Resource, Default)]
+#[allow(dead_code)]
+pub struct ChatBuffer {
+    pub messages: Vec<ChatMessage>,
+}
+
+/// Ping history entries for server latency tracking.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct PingEntry {
+    pub timestamp: f64,
+    pub latency_ms: u64,
+}
+
+/// Per-server ping history for the graph.
+#[derive(Resource, Default)]
+#[allow(dead_code)]
+pub struct PingHistory {
+    pub entries: HashMap<String, Vec<PingEntry>>,
+}
 
 /// Display names learned from connected peers via `Request::Hello { name }`.
 ///
@@ -1276,6 +1339,7 @@ pub fn on_peer_disconnected(
     sim: Option<Res<MatchSim>>,
     channels: Res<NetChannels>,
     mut commands: Commands,
+    mut reconn: ResMut<ReconnectionState>,
 ) {
     let NetEvent::PeerDisconnected(peer) = ev.event() else {
         return;
@@ -1295,11 +1359,91 @@ pub fn on_peer_disconnected(
     info!("Opponent {peer} disconnected, back to menu");
     pending.0 = None;
     if *state == AppState::Playing {
+        reconn.target = Some(*peer);
+        reconn.active = true;
+        reconn.countdown = Some(Timer::from_seconds(10.0, TimerMode::Once));
         next.set(AppState::Menu);
     } else {
         opponent.0 = None;
     }
-    let _ = channels;
+}
+
+// --- Auto-update system ----------------------------------------------------
+
+/// Checks for updates from the GitHub API.
+pub fn update_update_checker(
+    mut timer: ResMut<UpdateTimer>,
+    mut update_info: ResMut<UpdateInfo>,
+    time: Res<Time>,
+) {
+    timer.0.tick(time.delta());
+    if !timer.0.just_finished() {
+        return;
+    }
+    timer.0.reset();
+    match fetch_latest_version() {
+        Ok((version, url)) => {
+            update_info.latest_version = Some(version);
+            update_info.available = true;
+            update_info.release_url = Some(url);
+        }
+        Err(_) => {}
+    }
+}
+
+/// Fetches the latest release version from GitHub synchronously.
+fn fetch_latest_version() -> Result<(String, String), Box<dyn std::error::Error>> {
+    let url = "https://api.github.com/repos/KEROJAM/ponged/releases/latest";
+    let resp = reqwest::blocking::get(url)?;
+    let body: Value = resp.json()?;
+    let tag = body["tag_name"].as_str().unwrap_or("unknown").to_string();
+    let html_url = body["html_url"].as_str().unwrap_or("").to_string();
+    Ok((tag, html_url))
+}
+
+// --- Chat system -----------------------------------------------------------
+
+/// Handles chat message display in the menu.
+pub fn update_chat(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut chat_buffer: ResMut<ChatBuffer>,
+) {
+    let _ = (keyboard_input, chat_buffer);
+}
+
+// --- Ping history system ---------------------------------------------------
+
+/// Records a ping measurement for each server address.
+pub fn record_ping(
+    mut ping_history: ResMut<PingHistory>,
+    gateway_addrs: Res<GatewayAddresses>,
+) {
+    for entry in &gateway_addrs.0 {
+        let ping_ms = entry.ping_ms.unwrap_or(0);
+        let addr = entry.address.clone();
+        let entries = ping_history.entries.entry(addr).or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        entries.push(PingEntry {
+            timestamp: now,
+            latency_ms: ping_ms,
+        });
+        if entries.len() > 60 {
+            entries.remove(0);
+        }
+    }
+}
+
+/// Saves config when options are closed.
+pub fn save_config_on_options_close(
+    options_open: ResMut<OptionsOpen>,
+    config: Res<Config>,
+) {
+    if !options_open.0 {
+        config.save();
+    }
 }
 
 // --- UI drivers ------------------------------------------------------------
@@ -1734,6 +1878,7 @@ pub fn update_options(
     gateway: Res<GatewayState>,
     channels: Res<NetChannels>,
     mut options_open: ResMut<OptionsOpen>,
+    config: Res<Config>,
 ) {
     if !options_open.0 {
         root.display = Display::None;
@@ -1779,6 +1924,7 @@ pub fn update_options(
                         });
                     }
                 }
+                config.save();
                 options_open.0 = false;
             }
             OptionsButton::Back => {
@@ -2026,3 +2172,25 @@ pub fn update_node_graph(
         }
     }
 }
+
+// --- Reconnection system ---------------------------------------------------
+
+/// Handles reconnection attempts when a peer disconnects during a match.
+pub fn update_reconnection(
+    mut reconn: ResMut<ReconnectionState>,
+    time: Res<Time>,
+) {
+    let Some(target) = reconn.target else { return };
+    if !reconn.active { return; }
+
+    if let Some(ref mut countdown) = reconn.countdown {
+        countdown.tick(time.delta());
+        if countdown.just_finished() {
+            info!("Reconnection to {target} timed out");
+            reconn.active = false;
+            reconn.target = None;
+            return;
+        }
+    }
+}
+

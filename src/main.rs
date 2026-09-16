@@ -3,6 +3,9 @@ use bevy::math::bounding::{Aabb2d, BoundingVolume, IntersectsVolume};
 use bevy::prelude::*;
 use ponged::protocol;
 
+use crate::config::Config;
+
+mod config;
 mod history;
 mod menu;
 mod networking;
@@ -154,11 +157,13 @@ fn spawn_paddles(
 fn handle_player_input(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut paddle_velocity: Single<&mut Velocity, With<Player>>,
+    config: Res<Config>,
 ) {
-    if keyboard_input.pressed(KeyCode::ArrowUp) {
-        paddle_velocity.0.y = PADDLE_SPEED;
-    } else if keyboard_input.pressed(KeyCode::ArrowDown) {
-        paddle_velocity.0.y = -PADDLE_SPEED;
+    let speed = config.paddle_speed;
+    if keyboard_input.pressed(config.key_up) {
+        paddle_velocity.0.y = speed;
+    } else if keyboard_input.pressed(config.key_down) {
+        paddle_velocity.0.y = -speed;
     } else {
         paddle_velocity.0.y = 0.;
     }
@@ -463,6 +468,7 @@ fn main() {
         .init_resource::<networking_demo::SnapshotSeq>()
         .init_resource::<networking::GatewayState>()
         .init_resource::<menu::ServerPingTimer>()
+        .init_resource::<config::Config>()
         .init_resource::<menu::Username>()
         .init_resource::<menu::LocalPeerId>()
         .init_resource::<menu::Opponent>()
@@ -478,10 +484,12 @@ fn main() {
         .init_resource::<menu::OrbitState>()
         .init_resource::<history::MatchHistory>()
         .init_resource::<sim::MatchOver>()
-        .add_systems(
-            Startup,
-            (menu::load_settings, menu::install_default_font, spawn_camera, networking_demo::setup),
-        )
+        .init_resource::<menu::ReconnectionState>()
+        .init_resource::<menu::UpdateInfo>()
+        .init_resource::<menu::UpdateTimer>()
+        .init_resource::<menu::ChatBuffer>()
+        .init_resource::<menu::PingHistory>()
+        .add_systems(Startup, (config::load_config, menu::load_settings, menu::install_default_font, spawn_camera, networking_demo::setup))
         .add_systems(OnEnter(AppState::Menu), menu::spawn_menu)
         .add_systems(OnEnter(AppState::Menu), history::refresh_on_menu)
         .add_systems(OnExit(AppState::Menu), menu::despawn_menu)
@@ -517,6 +525,23 @@ fn main() {
         .add_systems(
             Update,
             menu::update_server_ping_refresh.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
+            (
+                menu::update_reconnection.run_if(in_state(AppState::Playing)),
+                menu::update_update_checker.run_if(in_state(AppState::Menu)),
+                menu::update_chat.run_if(in_state(AppState::Menu)),
+            )
+                .chain(),
+        )
+        .add_systems(
+            Update,
+            (
+                menu::record_ping.run_if(in_state(AppState::Menu)),
+                menu::save_config_on_options_close,
+            )
+                .chain(),
         )
         .add_systems(
             Update,
