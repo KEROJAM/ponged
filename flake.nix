@@ -17,9 +17,10 @@
   in {
     # ── Development shell (unchanged) ────────────────────────────────
     devShells."x86_64-linux".default = pkgs.mkShell {
-      buildInputs = with pkgs; [
-       vulkan-loader cargo rustc rustfmt clippy rust-analyzer glib wayland-protocols wayland alsa-lib libudev-zero
-       libxkbcommon libx11 libxcursor libxrandr libxi libxcb
+buildInputs = with pkgs; [
+        vulkan-loader cargo rustc rustfmt clippy rust-analyzer glib wayland-protocols wayland alsa-lib libudev-zero
+        libxkbcommon libx11 libxcursor libxrandr libxi libxcb
+        sqlcipher openssl pkg-config
       ];
 
       LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [ wayland libxkbcommon vulkan-loader libx11 libxcursor libxrandr libxi libxcb ]);

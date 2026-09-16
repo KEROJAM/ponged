@@ -1,17 +1,22 @@
 //! Local match history / ranking (M9).
 //!
-//! Purely client-side persistence backed by SQLite (rusqlite). The result of
-//! every finished match is written when we leave the `Playing` state, and the
-//! lobby (M5) reads it back to show a win/loss record and recent games.
+//! Purely client-side persistence backed by encrypted SQLite
+//! (SQLCipher via rusqlite). The result of every finished match is
+//! written when we leave the `Playing` state, and the lobby (M5) reads
+//! it back to show a win/loss record and recent games.
 //! The database is stored in the platform's application data directory
 //! (~/.local/share/ponged/ on Linux, %APPDATA%/ponged/ on Windows) so it
-//! persists regardless of the working directory.
+//! persists regardless of the working directory and is encrypted at rest.
 
 use std::sync::Mutex;
 
 use bevy::prelude::*;
 use dirs::data_local_dir;
 use rusqlite::{Connection, params};
+
+/// Encryption key for the SQLite database. Stored here to keep the
+/// database encrypted at rest; this is the only place it is stored.
+const DB_ENCRYPTION_KEY: &str = "ponged-v1-encrypted-history";
 
 use crate::Score;
 use crate::menu::Opponent;
@@ -68,10 +73,18 @@ impl MatchHistory {
         if self.db.is_some() {
             return;
         }
-        let Ok(conn) = Connection::open(Self::db_path()) else {
+        let db_path = Self::db_path();
+        let Ok(conn) = Connection::open(&db_path) else {
             warn!("Could not open local match history database");
             return;
         };
+        if conn
+            .execute_batch(&format!("PRAGMA key = '{}';", DB_ENCRYPTION_KEY))
+            .is_err()
+        {
+            warn!("Could not set database encryption key");
+            return;
+        }
         if conn
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS matches (
