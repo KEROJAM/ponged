@@ -114,6 +114,34 @@ Persiste la identidad del gateway (`gateway.key`) y los ratings
 > clientes deben dialear para el relay. La imagen OCI también se puede producir
 > desde el flake: `nix build .#dockerImage`.
 
+## Lista de servidores gateway
+
+El cliente lee `assets/gateways.json` para conocer las direcciones
+de los servidores disponibles. Cada entrada tiene:
+
+- `address` — multiaddr del servidor (ej. `/ip4/127.0.0.1/tcp/4001`)
+- `ping_ms` — latencia medida en ms (se actualiza automáticamente al
+  ordenar por ping)
+
+### Agregar un servidor
+
+Edita `assets/gateways.json` y añade una entrada:
+
+```json
+[
+  {"address": "/ip4/127.0.0.1/tcp/4001", "ping_ms": 0},
+  {"address": "/ip4/tu-servidor/tcp/4001", "ping_ms": 0}
+]
+```
+
+Los servidores se ordenan automáticamente por latencia de ping al
+iniciar el cliente y se re-evalúan cada 30 segundos.
+
+> Alternativamente, usa la variable de entorno `PONG_GATEWAY`:
+> ```bash
+> PONG_GATEWAY=/ip4/1.2.3.4/tcp/4001,/ip4/5.6.7.8/tcp/4001 nix develop -c cargo run --bin ponged
+> ```
+
 ## Sala de partidas / despliegue en WAN
 
 1. Arranca el gateway con `--public <IP pública>`.

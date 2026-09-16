@@ -83,6 +83,13 @@ jobs:
         with:
           path: dist
 
+      # Copiar gateways.json para que los usuarios tengan la lista
+      # de servidores ordenada por ping al descargar la release.
+      - name: Copiar configuracion de servidores
+        run: |
+          mkdir -p dist/gateway-config
+          cp assets/gateways.json dist/gateway-config/
+
       - name: Crear tag y release
         uses: softprops/action-gh-release@v2
         with:
