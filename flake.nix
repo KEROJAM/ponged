@@ -58,6 +58,7 @@ buildInputs = with pkgs; [
         libudev-zero
         wayland
 	libxkbcommon
+        openssl
       ]);
     });
 
