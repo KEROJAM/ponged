@@ -14,52 +14,32 @@
     muslRust = musl.rustPlatform;
     staticFlags = "-C target-feature=+crt-static";
 
-    # sqlcipher always tries to build libsqlite3.so and the Tcl bindings,
-    # both via `-shared`. pkgsStatic injects -static into every link, so
-    # those -shared links fail (crtbeginT.o relocation error). We only
-    # need the static archive (rusqlite links libsqlcipher.a via
-    # pkg-config), so disable the shared/Tcl targets and do a
-    # static-only install.
-    staticSqlcipher = static.sqlcipher.overrideAttrs (old: {
-      makeFlags = (old.makeFlags or []) ++ [
-        "ENABLE_LIB_SHARED=0"
-        "ENABLE_LIB_STATIC=1"
-        "HAVE_TCL=0"
-      ];
-
-      # Upstream postInstall assumes shared libs exist: its
-      # `rename ... $out/lib/libsqlite3*` returns exit status 4
-      # ("nothing was renamed") when the glob is empty, which aborts the
-      # build under `set -e`. Static-only equivalent below.
-      postInstall = ''
-        mv $out/bin/sqlite3 $out/bin/sqlcipher
-        mkdir -p $out/include/sqlcipher
-        mv $out/include/sqlite3.h $out/include/sqlcipher/sqlite3.h
-        mv $out/include/sqlite3ext.h $out/include/sqlcipher/sqlite3ext.h
-        mv $out/lib/libsqlite3.a $out/lib/libsqlcipher.a
-        mv $out/lib/pkgconfig/sqlite3.pc $out/lib/pkgconfig/sqlcipher.pc
-        mv $out/share/man/man1/sqlite3.1 $out/share/man/man1/sqlcipher.1
-        substituteInPlace $out/lib/pkgconfig/sqlcipher.pc \
-          --replace-fail "-lsqlite3" "-lsqlcipher" \
-          --replace-fail "-lz" "-lz -lcrypto" \
-          --replace-fail "includedir}" "includedir}/sqlcipher"
-      '';
-    });
+    # El cliente se enlaza DINAMICAMENTE (glibc). Motivo: winit 0.30
+    # carga libxkbcommon y libxcb en runtime via `dlopen`, que un binario
+    # musl estatico no soporta (panico XKBNotFound). Los binarios dynamicos
+    # de NixOS llevan los RPATH/closure en el store, no se instala nada a mano.
+    # Los end-users de OTRAS distros necesitarián esas libs de sistema,
+    # pero sqlcipher/openssl NO: rusqlite usa `bundled-sqlcipher-vendored-openssl`
+    # (ver Cargo.toml), ambos compilados desde fuente dentro del binario.
+    clientLibs = with pkgs; [
+      vulkan-loader wayland wayland-protocols libxkbcommon
+      alsa-lib libudev-zero glib
+      libx11 libxcursor libxrandr libxi libxcb
+      openssl
+    ];
 
   in {
-    # ── Development shell (unchanged) ────────────────────────────────
-    devShells."x86_64-linux".default = pkgs.mkShell {
-buildInputs = with pkgs; [
-        vulkan-loader cargo rustc rustfmt clippy rust-analyzer glib wayland-protocols wayland alsa-lib libudev-zero
-        libxkbcommon libx11 libxcursor libxrandr libxi libxcb
-        sqlcipher openssl pkg-config
-      ];
+    # ── Development shell ───────────────────────────────────────────
+devShells."x86_64-linux".default = pkgs.mkShell {
+      buildInputs = clientLibs ++ (with pkgs; [
+        cargo rustc rustfmt clippy rust-analyzer
+      ]);
 
       LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [ wayland libxkbcommon vulkan-loader libx11 libxcursor libxrandr libxi libxcb ]);
       shellHook = ''
 	      export LD_LIBRARY_PATH=${pkgs.wayland}/lib:$LD_LIBRARY_PATH
-	'';
-      nativeBuildInputs = [ pkgs.pkg-config ];
+	  '';
+      nativeBuildInputs = [pkgs.pkg-config pkgs.perl];
 
       env.RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
     };
@@ -70,32 +50,22 @@ buildInputs = with pkgs; [
       version = "0.1.0";
       src = ./.;
       cargoLock.lockFile = ./Cargo.lock;
-      nativeBuildInputs = [static.pkg-config];
-      buildInputs = [static.wayland static.libudev-zero];
+      nativeBuildInputs = [static.pkg-config pkgs.perl];
+      buildInputs = [static.wayland static.libudev-zero static.openssl];
       RUSTFLAGS = staticFlags;
       cargoBuildFlags = ["--bin" "pong-gateway"];
     };
 
-    # ── Game client binary (Bevy + Vulkan, musl estatico) ──────────
-    packages."x86_64-linux".pong-client = (muslRust.buildRustPackage {
+    # ── Game client binary (Bevy + Vulkan, glibc dinámico) ──────────
+    packages."x86_64-linux".pong-client = pkgs.rustPlatform.buildRustPackage {
       pname = "pong-client";
-      version = "0.1.0";
+      version = "0.1.1";
       src = ./.;
       cargoLock.lockFile = ./Cargo.lock;
-      nativeBuildInputs = [static.pkg-config];
-      RUSTFLAGS = staticFlags;
+      nativeBuildInputs = [pkgs.pkg-config pkgs.perl];
+      buildInputs = clientLibs;
       cargoBuildFlags = ["--bin" "ponged"];
-    }).overrideAttrs (old: {
-      buildInputs = (old.buildInputs or []) ++ (with static; [
-        libudev-zero
-        wayland
-	libxkbcommon
-        openssl
-        # sqlcipher with static sqlite dependency (shared .so disabled,
-        # see staticSqlcipher above)
-        staticSqlcipher
-      ]);
-    });
+    };
 
     # ── Docker image (gateway only, minimal) ────────────────────────
     packages."x86_64-linux".dockerImage = pkgs.dockerTools.buildLayeredImage {
