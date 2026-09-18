@@ -14,6 +14,38 @@
     muslRust = musl.rustPlatform;
     staticFlags = "-C target-feature=+crt-static";
 
+    # sqlcipher always tries to build libsqlite3.so and the Tcl bindings,
+    # both via `-shared`. pkgsStatic injects -static into every link, so
+    # those -shared links fail (crtbeginT.o relocation error). We only
+    # need the static archive (rusqlite links libsqlcipher.a via
+    # pkg-config), so disable the shared/Tcl targets and do a
+    # static-only install.
+    staticSqlcipher = static.sqlcipher.overrideAttrs (old: {
+      makeFlags = (old.makeFlags or []) ++ [
+        "ENABLE_LIB_SHARED=0"
+        "ENABLE_LIB_STATIC=1"
+        "HAVE_TCL=0"
+      ];
+
+      # Upstream postInstall assumes shared libs exist: its
+      # `rename ... $out/lib/libsqlite3*` returns exit status 4
+      # ("nothing was renamed") when the glob is empty, which aborts the
+      # build under `set -e`. Static-only equivalent below.
+      postInstall = ''
+        mv $out/bin/sqlite3 $out/bin/sqlcipher
+        mkdir -p $out/include/sqlcipher
+        mv $out/include/sqlite3.h $out/include/sqlcipher/sqlite3.h
+        mv $out/include/sqlite3ext.h $out/include/sqlcipher/sqlite3ext.h
+        mv $out/lib/libsqlite3.a $out/lib/libsqlcipher.a
+        mv $out/lib/pkgconfig/sqlite3.pc $out/lib/pkgconfig/sqlcipher.pc
+        mv $out/share/man/man1/sqlite3.1 $out/share/man/man1/sqlcipher.1
+        substituteInPlace $out/lib/pkgconfig/sqlcipher.pc \
+          --replace-fail "-lsqlite3" "-lsqlcipher" \
+          --replace-fail "-lz" "-lz -lcrypto" \
+          --replace-fail "includedir}" "includedir}/sqlcipher"
+      '';
+    });
+
   in {
     # ── Development shell (unchanged) ────────────────────────────────
     devShells."x86_64-linux".default = pkgs.mkShell {
@@ -59,7 +91,9 @@ buildInputs = with pkgs; [
         wayland
 	libxkbcommon
         openssl
-	sqlcipher
+        # sqlcipher with static sqlite dependency (shared .so disabled,
+        # see staticSqlcipher above)
+        staticSqlcipher
       ]);
     });
 
