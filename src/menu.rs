@@ -132,6 +132,10 @@ impl Default for ChatBuffer {
     }
 }
 
+/// Whether the chat panel is currently visible.
+#[derive(Resource, Default)]
+pub struct ChatOpen(pub bool);
+
 impl ChatBuffer {
     const MAX_MESSAGES: usize = 50;
 
@@ -407,6 +411,8 @@ pub struct ChatSendButton;
 pub struct ChatToggleButton;
 #[derive(Component)]
 pub struct ChatMessageLine;
+#[derive(Component)]
+pub struct ChatHeader;
 
 // --- Expanded settings components ---
 #[derive(Component)]
@@ -1077,6 +1083,7 @@ pub fn spawn_menu(
     ));
 
     // --- Chat panel (right side of lobby) ---
+    commands.insert_resource(ChatOpen(true));
     commands.spawn((
         ChatRoot,
         Node {
@@ -1088,6 +1095,7 @@ pub fn spawn_menu(
             flex_direction: FlexDirection::Column,
             border: UiRect::all(px(2.)),
             row_gap: px(0.),
+            display: Display::Flex,
             ..default()
         },
         BackgroundColor(Color::srgba(0.05, 0.05, 0.1, 0.85)),
@@ -1095,6 +1103,7 @@ pub fn spawn_menu(
         children![
             // Header
             (
+                ChatHeader,
                 Node {
                     width: percent(100.),
                     padding: UiRect::axes(px(12.), px(8.)),
@@ -1107,6 +1116,25 @@ pub fn spawn_menu(
                     Text::new("Chat"),
                     TextFont::from_font_size(18.0),
                     TextColor(Color::WHITE),
+                ), (
+                    ChatToggleButton,
+                    Button,
+                    Node {
+                        width: px(24.),
+                        height: px(24.),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        border: UiRect::all(px(1.)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                    BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.4)),
+                    children![(
+                        ButtonText,
+                        Text::new("x"),
+                        TextFont::from_font_size(14.0),
+                        TextColor(Color::WHITE),
+                    )],
                 )],
             ),
             // Messages area
@@ -1764,12 +1792,14 @@ pub fn send_chat_message(
 #[allow(clippy::too_many_arguments)]
 pub fn update_chat(
     keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut chat_open: ResMut<ChatOpen>,
     mut chat_buffer: ResMut<ChatBuffer>,
     username: Res<Username>,
     peers: Res<Peers>,
     channels: Res<NetChannels>,
     mut chat_input: Single<&mut EditableText, With<ChatInput>>,
     send_button: Query<&Interaction, With<ChatSendButton>>,
+    chat_toggle: Query<&Interaction, With<ChatToggleButton>>,
     mut messages_container: Query<
         (Entity, &Children),
         (With<ChatMessagesContainer>, Without<ChatInput>),
@@ -1777,6 +1807,23 @@ pub fn update_chat(
     mut message_texts: Query<&mut Text, With<ChatMessageLine>>,
     mut commands: Commands,
 ) {
+    // Update chat panel visibility based on ChatOpen resource
+    for (_entity, children) in messages_container.iter() {
+        for &child in children {
+            if let Ok(mut text) = message_texts.get_mut(child) {
+                text.0 = String::new();
+            }
+        }
+    }
+
+    // Handle chat toggle button
+    for interaction in &chat_toggle {
+        if *interaction == Interaction::Pressed {
+            chat_open.0 = !chat_open.0;
+            return; // Skip other updates when toggling
+        }
+    }
+
     // Check if send was clicked or Enter pressed
     let mut should_send = false;
     for interaction in &send_button {

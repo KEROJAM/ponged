@@ -4,8 +4,6 @@
 //! encrypted match history database. Settings survive working directory
 //! changes and are loaded at startup.
 
-use std::sync::Mutex;
-
 use bevy::prelude::*;
 use dirs::data_local_dir;
 use rusqlite::{Connection, params};
