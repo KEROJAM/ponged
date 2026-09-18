@@ -104,12 +104,22 @@ jobs:
         with:
           path: dist
 
-      # Copiar gateways.json para que los usuarios tengan la lista
-      # de servidores ordenada por ping al descargar la release.
-      - name: Copiar configuracion de servidores
+      # Unificar assets compartidos: cada artefacto por plataforma incluye
+      # assets/gateways.json y assets/DejaVuSans.ttf duplicados, y subir a la
+      # release ficheros con el mismo nombre da error en action-gh-release
+      # (update release asset metadata -> HttpError: Not Found).
+      - name: Unificar assets de la release
         run: |
-          mkdir -p dist/gateway-config
-          cp assets/gateways.json dist/gateway-config/
+          set -euo pipefail
+          rm -rf dist/assets
+          mkdir -p dist/assets
+          cp assets/gateways.json dist/assets/gateways.json
+          TTF=$(find dist/binarios-linux dist/binarios-windows \
+            -path '*/assets/DejaVuSans.ttf' | head -n1)
+          cp "$TTF" dist/assets/DejaVuSans.ttf
+          find dist/binarios-linux dist/binarios-windows \
+            -type d -name assets -exec rm -rf {} +
+          rm -rf dist/gateway-config
 
       - name: Crear tag y release
         uses: softprops/action-gh-release@v2
