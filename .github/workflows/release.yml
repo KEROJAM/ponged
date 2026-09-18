@@ -41,7 +41,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential pkg-config libssl-dev perl
+          sudo apt-get install -y build-essential pkg-config perl libssl-dev \
+            libwayland-dev libxkbcommon-dev libudev-dev libasound2-dev \
+            libvulkan-dev libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libxcb1-dev
 
       - name: Instalar Rust stable (Linux)
         if: runner.os == 'Linux'
