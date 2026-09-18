@@ -59,6 +59,7 @@ buildInputs = with pkgs; [
         wayland
 	libxkbcommon
         openssl
+	sqlcipher
       ]);
     });
 
