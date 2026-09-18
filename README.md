@@ -90,13 +90,60 @@ imprime al arrancarlo; si no es localhost, pasa la dirección con
 PONG_GATEWAY=/ip4/<ip-del-gateway>/tcp/4001 nix develop -c cargo run --bin ponged
 ```
 
-## Build de release / binarios estáticos
+## Build de release / binarios
 
 ```bash
-# Binarios musl 100% estáticos (lo usa el release.yml de GitHub Actions)
+# Gateway: musl 100% estático (lo usa el release.yml de GitHub Actions)
 nix build .#pong-gateway --no-link --print-out-paths
+# Cliente: glibc dinámico (winit requiere dlopen de xkbcommon/wayland/X11)
 nix build .#pong-client --no-link --print-out-paths
 ```
+
+## Correr el cliente por plataforma
+
+### Linux
+
+El cliente `pong-client` se enlaza **dinámicamente contra glibc**: usa las
+bibliotecas del sistema para Wayland/X11, teclado (`libxkbcommon`), udev, ALSA
+y Vulkan. **SQLCipher y OpenSSL van compiladas *dentro* del binario** (feature
+`bundled-sqlcipher-vendored-openssl` de rusqlite): no se instala sqlite ni
+openssl en ningún sitio.
+
+- **Con Nix (recomendado)** — todo lo resuelve el store, no instales nada:
+  ```bash
+  nix build .#pong-client
+  ./result/bin/ponged
+  ```
+  (en modo dev: `nix develop -c cargo run --bin ponged`).
+
+- **En otras distros**, el binario necesita en *runtime*: driver + loader de
+  Vulkan, una sesión Wayland o X11, `libxkbcommon`, `libudev`, ALSA y `libssl`.
+  Ejemplo (Debian/Ubuntu, los nombres varían según la distro):
+  ```bash
+  sudo apt install mesa-vulkan-drivers libvulkan1 \
+                   libwayland0 libx11-6 libxkbcommon0 \
+                   libudev1 libasound2 libssl3
+  ```
+  Si el cliente crashea al arrancar con errores tipo `Failed loading
+  lib...so`, falta alguna de esas bibliotecas.
+
+### Windows
+
+No hay soporte Nix en Windows; se compila con `cargo` nativo (toolchain MSVC).
+Requisitos:
+
+- [Rust](https://rustup.rs/) estable con target MSVC.
+- **Visual Studio Build Tools** con el workload "C++ build tools"
+  (el compilador MSVC lo usan los crates C: SQLCipher y OpenSSL empaquetados).
+- **Perl** (necesario para compilar el OpenSSL empaquetado de SQLCipher).
+- GPU con driver **DirectX 12** o Vulkan.
+
+```bat
+cargo run --release --bin ponged
+```
+
+En Windows el backend de winit es nativo (no Wayland/X11) y la config de red
+funciona igual: `PONG_GATEWAY` y `assets/gateways.json`.
 
 ## Docker (gateway)
 
