@@ -536,6 +536,7 @@ fn main() {
                 menu::update_reconnection.run_if(in_state(AppState::Playing)),
                 menu::update_update_checker.run_if(in_state(AppState::Menu)),
                 menu::update_chat.run_if(in_state(AppState::Menu)),
+                menu::focus_text_input.run_if(in_state(AppState::Menu)),
             )
                 .chain(),
         )

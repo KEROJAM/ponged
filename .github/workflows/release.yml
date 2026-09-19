@@ -113,7 +113,6 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf dist/assets
-          cp -r assets dist/assets
           find dist/binarios-linux dist/binarios-windows \
             -type d -name assets -exec rm -rf {} +
           rm -rf dist/gateway-config

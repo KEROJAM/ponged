@@ -3,9 +3,9 @@ use std::net::SocketAddr;
 
 use bevy::asset::AssetId;
 use bevy::prelude::*;
-use bevy::text::{EditableText, Font};
+use bevy::text::{EditableText, Font, TextCursorStyle, TextEdit};
 use serde_json::{from_str, Value};
-use bevy::input_focus::AutoFocus;
+use bevy::input_focus::{AutoFocus, FocusCause, InputFocus};
 use libp2p::core::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
 
@@ -765,6 +765,8 @@ pub fn spawn_menu(
                 (
                     OptionsInput,
                     EditableText::new(username.0.clone()),
+                    TextCursorStyle::default(),
+                    Interaction::None,
                     TextFont::from_font_size(22.0),
                     TextColor(Color::WHITE),
                     Node {
@@ -1008,6 +1010,8 @@ pub fn spawn_menu(
                     OnboardingInput,
                     AutoFocus,
                     EditableText::new(username.0.clone()),
+                    TextCursorStyle::default(),
+                    Interaction::None,
                     TextFont::from_font_size(24.0),
                     TextColor(Color::WHITE),
                     Node {
@@ -1169,6 +1173,8 @@ pub fn spawn_menu(
                     (
                         ChatInput,
                         EditableText::new("".to_string()),
+                        TextCursorStyle::default(),
+                        Interaction::None,
                         TextFont::from_font_size(14.0),
                         TextColor(Color::WHITE),
                         Node {
@@ -1828,10 +1834,10 @@ pub fn update_chat(
     mut chat_input: Single<&mut EditableText, With<ChatInput>>,
     mut chat_root: Single<&mut Node, (With<ChatRoot>, Without<ChatReopenButton>)>,
     mut reopen_button: Single<&mut Node, (With<ChatReopenButton>, Without<ChatRoot>)>,
-    send_button: Query<&Interaction, With<ChatSendButton>>,
-    chat_toggle: Query<&Interaction, With<ChatToggleButton>>,
-    mut messages_container: Query<
-        (Entity, &Children),
+    send_button: Query<Ref<Interaction>, With<ChatSendButton>>,
+    chat_toggle: Query<Ref<Interaction>, With<ChatToggleButton>>,
+    messages_container: Query<
+        (Entity, Option<&Children>),
         (With<ChatMessagesContainer>, Without<ChatInput>),
     >,
     mut message_texts: Query<&mut Text, With<ChatMessageLine>>,
@@ -1851,7 +1857,7 @@ pub fn update_chat(
 
     // Handle chat toggle button
     for interaction in &chat_toggle {
-        if *interaction == Interaction::Pressed {
+        if interaction.is_changed() && *interaction == Interaction::Pressed {
             chat_open.0 = !chat_open.0;
             return; // Skip other updates when toggling
         }
@@ -1860,7 +1866,7 @@ pub fn update_chat(
     // Check if send was clicked or Enter pressed
     let mut should_send = false;
     for interaction in &send_button {
-        if *interaction == Interaction::Pressed {
+        if interaction.is_changed() && *interaction == Interaction::Pressed {
             should_send = true;
         }
     }
@@ -1879,33 +1885,37 @@ pub fn update_chat(
             });
             // Send to all peers
             send_chat_message(text, &peers, &channels);
-            // Clear input
-            **chat_input = EditableText::new(String::new());
+            // Clear input via edits (keeps focus and cursor intact)
+            chat_input.queue_edit(TextEdit::SelectAll);
+            chat_input.queue_edit(TextEdit::Delete);
         }
     }
 
     // Sync message display
-    if let Ok((container_entity, children)) = messages_container.single_mut() {
+    if let Some((container_entity, children)) = messages_container.iter().next() {
         let expected = chat_buffer.messages.len();
-        let current = children.len();
+        let current = children.map_or(0, |c| c.len());
 
         // Remove excess text entities if buffer shrunk
         if current > expected {
-            for entity in children.iter().skip(expected) {
-                commands.entity(entity).despawn();
+            if let Some(children) = children {
+                for entity in children.iter().skip(expected) {
+                    commands.entity(entity).despawn();
+                }
             }
         }
 
         // Update or create message text entities
         for (i, msg) in chat_buffer.messages.iter().enumerate() {
-            if i < current {
-                // Update existing
-                if let Ok(mut text) = message_texts.get_mut(children[i]) {
-                    let prefix = format!("{}: ", msg.from_name);
-                    let new_text = format!("{prefix}{}", msg.text);
-                    if text.0 != new_text {
-                        text.0 = new_text;
-                    }
+            if let Some(children) = children
+                && i < current
+                && let Ok(mut text) = message_texts.get_mut(children[i])
+            {
+                // Update existing message text
+                let prefix = format!("{}: ", msg.from_name);
+                let new_text = format!("{prefix}{}", msg.text);
+                if text.0 != new_text {
+                    text.0 = new_text;
                 }
             } else {
                 // Spawn new message entity
@@ -1928,7 +1938,24 @@ pub fn update_chat(
                         },
                     ));
                 });
+                info!("[chat] spawned message {}: {}", i, msg.text);
             }
+        }
+    }
+}
+
+/// Fallback: gives focus to a text box on click, ensuring typing works even if
+/// the widget plugin's pointer-focus path is not present.
+pub fn focus_text_input(
+    mut focus: ResMut<InputFocus>,
+    inputs: Query<
+        (Entity, Ref<Interaction>),
+        Or<(With<OptionsInput>, With<ChatInput>, With<OnboardingInput>)>,
+    >,
+) {
+    for (entity, interaction) in &inputs {
+        if interaction.is_changed() && *interaction == Interaction::Pressed {
+            focus.set(entity, FocusCause::Pressed);
         }
     }
 }
@@ -2106,7 +2133,7 @@ pub fn update_elo_bar(
 /// Handles the main menu buttons (hover feedback + presses).
 #[allow(clippy::too_many_arguments)]
 pub fn update_buttons(
-    mut buttons: Query<(&Interaction, &MenuButton, &Children, &mut BackgroundColor)>,
+    mut buttons: Query<(Ref<Interaction>, &MenuButton, &Children, &mut BackgroundColor)>,
     mut button_texts: Query<&mut TextColor, (With<ButtonText>, Without<MenuButton>)>,
     mut search: ResMut<AutoSearch>,
     mut gateway: ResMut<GatewayState>,
@@ -2126,7 +2153,7 @@ pub fn update_buttons(
                 tc.0 = if hovered { Color::BLACK } else { Color::WHITE };
             }
         }
-        if *interaction != Interaction::Pressed {
+        if !interaction.is_changed() || *interaction != Interaction::Pressed {
             continue;
         }
         match action {
@@ -2310,7 +2337,7 @@ pub fn update_prematch(
     mut root: Single<&mut Node, With<PreMatchRoot>>,
     mut label: Single<&mut Text, With<PreMatchText>>,
     mut buttons: Query<(
-        &Interaction,
+        Ref<Interaction>,
         &PreMatchButton,
         &Children,
         &mut BackgroundColor,
@@ -2348,7 +2375,7 @@ pub fn update_prematch(
                 tc.0 = if hovered { Color::BLACK } else { Color::WHITE };
             }
         }
-        if *interaction != Interaction::Pressed {
+        if !interaction.is_changed() || *interaction != Interaction::Pressed {
             continue;
         }
         match action {
@@ -2408,7 +2435,7 @@ pub fn update_options(
     mut root: Single<&mut Node, With<OptionsRoot>>,
     input: Single<&mut EditableText, With<OptionsInput>>,
     mut buttons: Query<(
-        &Interaction,
+        Ref<Interaction>,
         &OptionsButton,
         &Children,
         &mut BackgroundColor,
@@ -2448,7 +2475,7 @@ pub fn update_options(
                 };
             }
         }
-        if *interaction != Interaction::Pressed {
+        if !interaction.is_changed() || *interaction != Interaction::Pressed {
             continue;
         }
         match kind {
@@ -2481,14 +2508,14 @@ pub fn update_options(
 pub fn update_settings_controls(
     options_open: Res<OptionsOpen>,
     mut config: ResMut<Config>,
-    key_up_btn: Query<&Interaction, With<SettingsKeyUpButton>>,
-    key_down_btn: Query<&Interaction, With<SettingsKeyDownButton>>,
+    key_up_btn: Query<Ref<Interaction>, With<SettingsKeyUpButton>>,
+    key_down_btn: Query<Ref<Interaction>, With<SettingsKeyDownButton>>,
     mut key_up_label: Single<&mut Text, (With<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsWindowScaleLabel>, Without<SettingsVsyncLabel>)>,
     mut key_down_label: Single<&mut Text, (With<SettingsKeyDownLabel>, Without<SettingsKeyUpLabel>, Without<SettingsWindowScaleLabel>, Without<SettingsVsyncLabel>)>,
-    scale_up: Query<&Interaction, (With<SettingsWindowScaleUp>, Without<SettingsWindowScaleDown>)>,
-    scale_down: Query<&Interaction, (With<SettingsWindowScaleDown>, Without<SettingsWindowScaleUp>)>,
+    scale_up: Query<Ref<Interaction>, (With<SettingsWindowScaleUp>, Without<SettingsWindowScaleDown>)>,
+    scale_down: Query<Ref<Interaction>, (With<SettingsWindowScaleDown>, Without<SettingsWindowScaleUp>)>,
     mut scale_label: Single<&mut Text, (With<SettingsWindowScaleLabel>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsVsyncLabel>)>,
-    vsync_btn: Query<&Interaction, With<SettingsVsyncToggle>>,
+    vsync_btn: Query<Ref<Interaction>, With<SettingsVsyncToggle>>,
     mut vsync_label: Single<&mut Text, (With<SettingsVsyncLabel>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsWindowScaleLabel>)>,
 ) {
     if !options_open.0 {
@@ -2503,31 +2530,31 @@ pub fn update_settings_controls(
 
     // Handle keybind buttons: cycle through available keys
     if let Ok(i) = key_up_btn.single() {
-        if *i == Interaction::Pressed {
+        if i.is_changed() && *i == Interaction::Pressed {
             config.key_up = cycle_keycode(config.key_up);
         }
     }
     if let Ok(i) = key_down_btn.single() {
-        if *i == Interaction::Pressed {
+        if i.is_changed() && *i == Interaction::Pressed {
             config.key_down = cycle_keycode(config.key_down);
         }
     }
 
     // Handle window scale +/-
     if let Ok(i) = scale_up.single() {
-        if *i == Interaction::Pressed {
+        if i.is_changed() && *i == Interaction::Pressed {
             config.window_scale = (config.window_scale + 0.25).min(3.0);
         }
     }
     if let Ok(i) = scale_down.single() {
-        if *i == Interaction::Pressed {
+        if i.is_changed() && *i == Interaction::Pressed {
             config.window_scale = (config.window_scale - 0.25).max(0.5);
         }
     }
 
     // Handle vsync toggle
     if let Ok(i) = vsync_btn.single() {
-        if *i == Interaction::Pressed {
+        if i.is_changed() && *i == Interaction::Pressed {
             config.vsync = !config.vsync;
         }
     }
@@ -2560,7 +2587,7 @@ fn key_code_to_short(kc: KeyCode) -> String {
 pub fn update_onboarding(
     mut root: Single<&mut Node, With<OnboardingRoot>>,
     input: Single<&mut EditableText, With<OnboardingInput>>,
-    button: Query<(&Interaction, &Children), With<OnboardingButton>>,
+    button: Query<(Ref<Interaction>, &Children), With<OnboardingButton>>,
     mut button_texts: Query<&mut TextColor, (With<ButtonText>, Without<OnboardingButton>)>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut username: ResMut<Username>,
@@ -2587,7 +2614,7 @@ pub fn update_onboarding(
                 };
             }
         }
-        if *interaction == Interaction::Pressed {
+        if interaction.is_changed() && *interaction == Interaction::Pressed {
             submit = true;
         }
     }
