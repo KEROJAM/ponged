@@ -410,6 +410,8 @@ pub struct ChatSendButton;
 #[derive(Component)]
 pub struct ChatToggleButton;
 #[derive(Component)]
+pub struct ChatReopenButton;
+#[derive(Component)]
 pub struct ChatMessageLine;
 #[derive(Component)]
 pub struct ChatHeader;
@@ -431,6 +433,8 @@ pub struct SettingsWindowScaleDown;
 pub struct SettingsWindowScaleLabel;
 #[derive(Component)]
 pub struct SettingsVsyncToggle;
+#[derive(Component)]
+pub struct SettingsVsyncLabel;
 
 /// Loads persisted settings at startup and seeds the username resource.
 pub fn load_settings(mut commands: Commands, mut history: ResMut<MatchHistory>) {
@@ -899,6 +903,7 @@ pub fn spawn_menu(
                             BorderColor::all(Color::WHITE),
                             children![(
                                 ButtonText,
+                                SettingsVsyncLabel,
                                 Text::new("ON"),
                                 TextFont::from_font_size(16.0),
                                 TextColor(Color::WHITE),
@@ -1198,6 +1203,29 @@ pub fn spawn_menu(
                 ],
             ),
         ],
+    ));
+
+    commands.spawn((
+        ChatReopenButton,
+        ChatToggleButton,
+        Button,
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(16.),
+            top: px(16.),
+            padding: UiRect::axes(px(10.), px(6.)),
+            border: UiRect::all(px(1.)),
+            display: Display::None,
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.05, 0.05, 0.1, 0.85)),
+        BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.3)),
+        children![(
+            ButtonText,
+            Text::new("Chat"),
+            TextFont::from_font_size(14.0),
+            TextColor(Color::WHITE),
+        )],
     ));
 }
 
@@ -1798,6 +1826,8 @@ pub fn update_chat(
     peers: Res<Peers>,
     channels: Res<NetChannels>,
     mut chat_input: Single<&mut EditableText, With<ChatInput>>,
+    mut chat_root: Single<&mut Node, With<ChatRoot>>,
+    mut reopen_button: Single<&mut Node, With<ChatReopenButton>>,
     send_button: Query<&Interaction, With<ChatSendButton>>,
     chat_toggle: Query<&Interaction, With<ChatToggleButton>>,
     mut messages_container: Query<
@@ -1808,13 +1838,16 @@ pub fn update_chat(
     mut commands: Commands,
 ) {
     // Update chat panel visibility based on ChatOpen resource
-    for (_entity, children) in messages_container.iter() {
-        for &child in children {
-            if let Ok(mut text) = message_texts.get_mut(child) {
-                text.0 = String::new();
-            }
-        }
-    }
+    chat_root.display = if chat_open.0 {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    reopen_button.display = if chat_open.0 {
+        Display::None
+    } else {
+        Display::Flex
+    };
 
     // Handle chat toggle button
     for interaction in &chat_toggle {
@@ -2456,7 +2489,7 @@ pub fn update_settings_controls(
     scale_down: Query<&Interaction, (With<SettingsWindowScaleDown>, Without<SettingsWindowScaleUp>)>,
     mut scale_label: Single<&mut Text, (With<SettingsWindowScaleLabel>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>)>,
     vsync_btn: Query<&Interaction, With<SettingsVsyncToggle>>,
-    mut vsync_label: Single<&mut Text, (With<ButtonText>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsWindowScaleLabel>)>,
+    mut vsync_label: Single<&mut Text, With<SettingsVsyncLabel>>,
 ) {
     if !options_open.0 {
         return;
