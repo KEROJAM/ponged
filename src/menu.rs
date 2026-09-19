@@ -1826,8 +1826,8 @@ pub fn update_chat(
     peers: Res<Peers>,
     channels: Res<NetChannels>,
     mut chat_input: Single<&mut EditableText, With<ChatInput>>,
-    mut chat_root: Single<&mut Node, With<ChatRoot>>,
-    mut reopen_button: Single<&mut Node, With<ChatReopenButton>>,
+    mut chat_root: Single<&mut Node, (With<ChatRoot>, Without<ChatReopenButton>)>,
+    mut reopen_button: Single<&mut Node, (With<ChatReopenButton>, Without<ChatRoot>)>,
     send_button: Query<&Interaction, With<ChatSendButton>>,
     chat_toggle: Query<&Interaction, With<ChatToggleButton>>,
     mut messages_container: Query<
@@ -2483,13 +2483,13 @@ pub fn update_settings_controls(
     mut config: ResMut<Config>,
     key_up_btn: Query<&Interaction, With<SettingsKeyUpButton>>,
     key_down_btn: Query<&Interaction, With<SettingsKeyDownButton>>,
-    mut key_up_label: Single<&mut Text, (With<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsWindowScaleLabel>)>,
-    mut key_down_label: Single<&mut Text, (With<SettingsKeyDownLabel>, Without<SettingsKeyUpLabel>, Without<SettingsWindowScaleLabel>)>,
+    mut key_up_label: Single<&mut Text, (With<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsWindowScaleLabel>, Without<SettingsVsyncLabel>)>,
+    mut key_down_label: Single<&mut Text, (With<SettingsKeyDownLabel>, Without<SettingsKeyUpLabel>, Without<SettingsWindowScaleLabel>, Without<SettingsVsyncLabel>)>,
     scale_up: Query<&Interaction, (With<SettingsWindowScaleUp>, Without<SettingsWindowScaleDown>)>,
     scale_down: Query<&Interaction, (With<SettingsWindowScaleDown>, Without<SettingsWindowScaleUp>)>,
-    mut scale_label: Single<&mut Text, (With<SettingsWindowScaleLabel>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>)>,
+    mut scale_label: Single<&mut Text, (With<SettingsWindowScaleLabel>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsVsyncLabel>)>,
     vsync_btn: Query<&Interaction, With<SettingsVsyncToggle>>,
-    mut vsync_label: Single<&mut Text, With<SettingsVsyncLabel>>,
+    mut vsync_label: Single<&mut Text, (With<SettingsVsyncLabel>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsWindowScaleLabel>)>,
 ) {
     if !options_open.0 {
         return;
