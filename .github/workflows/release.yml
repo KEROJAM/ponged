@@ -104,19 +104,16 @@ jobs:
         with:
           path: dist
 
-      # Unificar assets compartidos: cada artefacto por plataforma incluye
-      # assets/gateways.json y assets/DejaVuSans.ttf duplicados, y subir a la
-      # release ficheros con el mismo nombre da error en action-gh-release
-      # (update release asset metadata -> HttpError: Not Found).
+      # Unificar assets compartidos: los artefactos por plataforma incluyen
+      # DIST/assets (gateways.json, fonts/DejaVuSans.ttf). Subir assets con el
+      # mismo nombre desde ambos artefactos da error en action-gh-release
+      # (update release asset metadata -> HttpError: Not Found), asi que se
+      # sube una sola copia desde el repo.
       - name: Unificar assets de la release
         run: |
           set -euo pipefail
           rm -rf dist/assets
-          mkdir -p dist/assets
-          cp assets/gateways.json dist/assets/gateways.json
-          TTF=$(find dist/binarios-linux dist/binarios-windows \
-            -path '*/assets/DejaVuSans.ttf' | head -n1)
-          cp "$TTF" dist/assets/DejaVuSans.ttf
+          cp -r assets dist/assets
           find dist/binarios-linux dist/binarios-windows \
             -type d -name assets -exec rm -rf {} +
           rm -rf dist/gateway-config
