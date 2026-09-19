@@ -175,6 +175,12 @@ impl GatewayState {
     }
 }
 
+/// Every peer identified as a matchmaking gateway this session. Gateways must
+/// never be offered a match or picked as an opponent; a deployment can run
+/// several instances, so this is the full set, not just the active one.
+#[derive(Resource, Default)]
+pub struct KnownGateways(pub std::collections::BTreeSet<PeerId>);
+
 /// A short, readable slice of a peer id for display (`12D3Koo...abcd`).
 pub fn short_peer(peer: PeerId) -> String {
     let base58 = peer.to_base58();
