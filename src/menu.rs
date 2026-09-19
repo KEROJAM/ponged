@@ -2450,11 +2450,11 @@ pub fn update_settings_controls(
     mut config: ResMut<Config>,
     key_up_btn: Query<&Interaction, With<SettingsKeyUpButton>>,
     key_down_btn: Query<&Interaction, With<SettingsKeyDownButton>>,
-    mut key_up_label: Single<&mut Text, With<SettingsKeyUpLabel>>,
-    mut key_down_label: Single<&mut Text, With<SettingsKeyDownLabel>>,
+    mut key_up_label: Single<&mut Text, (With<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsWindowScaleLabel>)>,
+    mut key_down_label: Single<&mut Text, (With<SettingsKeyDownLabel>, Without<SettingsKeyUpLabel>, Without<SettingsWindowScaleLabel>)>,
     scale_up: Query<&Interaction, (With<SettingsWindowScaleUp>, Without<SettingsWindowScaleDown>)>,
     scale_down: Query<&Interaction, (With<SettingsWindowScaleDown>, Without<SettingsWindowScaleUp>)>,
-    mut scale_label: Single<&mut Text, With<SettingsWindowScaleLabel>>,
+    mut scale_label: Single<&mut Text, (With<SettingsWindowScaleLabel>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>)>,
     vsync_btn: Query<&Interaction, With<SettingsVsyncToggle>>,
     mut vsync_label: Single<&mut Text, (With<ButtonText>, Without<SettingsKeyUpLabel>, Without<SettingsKeyDownLabel>, Without<SettingsWindowScaleLabel>)>,
 ) {
@@ -2658,6 +2658,7 @@ pub fn update_node_graph(
             Without<NodeLink>,
             Without<NodeLabel>,
             Without<NodeHub>,
+            Without<NodeHubLabel>,
         ),
     >,
     mut links: Query<
@@ -2667,6 +2668,7 @@ pub fn update_node_graph(
             Without<NodeBubble>,
             Without<NodeLabel>,
             Without<NodeHub>,
+            Without<NodeHubLabel>,
         ),
     >,
     mut hub_label_vis: Single<
