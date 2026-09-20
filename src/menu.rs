@@ -1508,11 +1508,11 @@ pub fn on_gateway_request(
     };
     match request {
         GatewayRequest::MatchFound {
-            opponent,
+            opponent: opponent_str,
             addresses,
         } => {
-            let Ok(opponent_peer) = opponent.parse::<PeerId>() else {
-                warn!("Gateway sent unparseable opponent id: {opponent}");
+            let Ok(opponent_peer) = opponent_str.parse::<PeerId>() else {
+                warn!("Gateway sent unparseable opponent id: {opponent_str}");
                 return;
             };
             if gateway.known.contains(&opponent_peer) {

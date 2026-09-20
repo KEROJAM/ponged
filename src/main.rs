@@ -692,7 +692,7 @@ mod networking_demo {
         ev: On<NetEvent>,
         mut peers: ResMut<Peers>,
         mut gateway_match: ResMut<crate::menu::GatewayMatch>,
-        mut pre: ResMut<crate::menu::PreMatch>,
+        pre: ResMut<crate::menu::PreMatch>,
         username: Res<crate::menu::Username>,
         channels: Res<NetChannels>,
     ) {
