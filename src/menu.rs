@@ -1375,6 +1375,41 @@ pub fn on_identity(
     }
 }
 
+/// Offers a match to a freshly connected peer once `identify` has confirmed it
+/// is a player. `on_peer_connected` cannot do this safely: a gateway connects
+/// and could be mistaken for an opponent before its agent version is known.
+pub fn on_peer_identified(
+    ev: On<NetEvent>,
+    search: Res<AutoSearch>,
+    mut pre: ResMut<PreMatch>,
+    gateway: Res<GatewayState>,
+    peers: Res<Peers>,
+    channels: Res<NetChannels>,
+) {
+    let NetEvent::Identity { peer, agent } = ev.event() else {
+        return;
+    };
+    if crate::networking::is_gateway_agent(agent) {
+        return;
+    }
+    if !peers.0.contains(peer) {
+        return;
+    }
+    if search.0
+        && pre.idle()
+        && !gateway.known.contains(peer)
+        && gateway.peer != Some(*peer)
+        && !pre.rejected.contains(peer)
+    {
+        info!("Offering a match to identified peer {peer}");
+        pre.begin(*peer);
+        let _ = channels.commands.send(NetCommand::SendRequest {
+            peer: *peer,
+            request: GameRequest::InviteToPlay,
+        });
+    }
+}
+
 /// Once the relay reservation is confirmed, register with the gateway and
 /// publish ourselves on its rendezvous server.
 pub fn on_relay_reservation(

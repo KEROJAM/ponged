@@ -613,6 +613,7 @@ fn main() {
         .add_observer(networking_demo::on_game_response)
         .add_observer(menu::on_local_peer_id)
         .add_observer(menu::on_identity)
+        .add_observer(menu::on_peer_identified)
         .add_observer(menu::on_relay_reservation)
         .add_observer(menu::on_gateway_response)
         .add_observer(menu::on_gateway_request)
@@ -692,9 +693,7 @@ mod networking_demo {
         mut peers: ResMut<Peers>,
         mut gateway_match: ResMut<crate::menu::GatewayMatch>,
         mut pre: ResMut<crate::menu::PreMatch>,
-        gateway: Res<crate::networking::GatewayState>,
         username: Res<crate::menu::Username>,
-        search: Res<crate::menu::AutoSearch>,
         channels: Res<NetChannels>,
     ) {
         if let NetEvent::PeerConnected(peer) = ev.event() {
@@ -722,22 +721,8 @@ mod networking_demo {
                     });
                 }
             }
-            // Auto-search (M5 "Jugar"): offer a match to a fresh LAN peer, one
-            // at a time — never the gateway itself or an already-paired peer.
-            let is_gateway = gateway.peer == Some(*peer);
-            if search.0
-                && !is_gateway
-                && !is_matched
-                && pre.idle()
-                && !pre.rejected.contains(peer)
-            {
-                info!("Offering a match to discovered peer {peer}");
-                pre.begin(*peer);
-                let _ = channels.commands.send(NetCommand::SendRequest {
-                    peer: *peer,
-                    request: Request::InviteToPlay,
-                });
-            }
+            // Match offers happen in `menu::on_peer_identified`, once `identify`
+            // has told us the peer is a player and not a gateway.
         }
     }
 
