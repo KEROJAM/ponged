@@ -287,7 +287,9 @@ async fn run_swarm(
         tokio::select! {
             Some(command) = command_rx.recv() => match command {
                 NetCommand::Dial(addr) => {
+                    let dial_addr = addr.to_string();
                     if let Err(e) = swarm.dial(addr) {
+                        info!("Dial {dial_addr} failed: {e:?}");
                         let _ = event_tx.send(NetEvent::Error(e.to_string()));
                     }
                 }
@@ -295,7 +297,9 @@ async fn run_swarm(
                     // A multiaddr ending in `/p2p-circuit` asks the relay
                     // transport to reserve a circuit on the named relay server
                     // (the gateway). Non-relayed addrs are rejected.
+                    let listen_addr = addr.to_string();
                     if let Err(e) = swarm.listen_on(addr) {
+                        info!("Listen on {listen_addr} failed: {e:?}");
                         let _ = event_tx.send(NetEvent::Error(e.to_string()));
                     }
                 }
@@ -337,6 +341,7 @@ async fn run_swarm(
                         // Make the relayed address a trusted external address so
                         // the rendezvous client can publish it for discovery.
                         swarm.add_external_address(address.clone());
+                        info!("Reserved relayed address {address:?}");
                         let _ = event_tx.send(NetEvent::RelayReservation {
                             relay_peer: *swarm.local_peer_id(),
                             success: true,
@@ -514,6 +519,12 @@ async fn run_swarm(
                         info!("Behaviour event: {other:?}");
                     }
                 },
+                SwarmEvent::OutgoingConnectionError { error, .. } => {
+                    info!("Outgoing connection error: {error:?}");
+                }
+                SwarmEvent::ListenerError { error, .. } => {
+                    info!("Listener error: {error:?}");
+                }
                 _ => {}
             },
         }

@@ -180,6 +180,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let default_base: Multiaddr =
         format!("/ip4/{public_host}/tcp/{}", port_of(&listen_addr)?).parse()?;
 
+    // The relay server builds the reservation responses (and circuit routes)
+    // from its external addresses; with none advertised, relay clients reject
+    // the reservation as `NoAddressesInReservation` and never register.
+    swarm.add_external_address(default_base.clone());
+    println!("  external: {default_base}");
+
     swarm.listen_on(listen_addr)?;
 
     // `players` keeps the in-memory lobby; the queue is simply our current
@@ -267,7 +273,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         let _ = event;
                     }
                     BehaviourEvent::Relay(event) => {
-                        let _ = event;
+                        println!("relay event: {event:?}");
                     }
                     BehaviourEvent::Ping(event) => {
                         if let libp2p::ping::Event { peer, result: Err(e), .. } = event {
