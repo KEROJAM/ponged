@@ -1496,6 +1496,7 @@ pub fn on_gateway_response(
 /// of auto-challenging.
 pub fn on_gateway_request(
     ev: On<NetEvent>,
+    state: Res<State<AppState>>,
     mut matched: ResMut<GatewayMatch>,
     mut intent: ResMut<MatchIntent>,
     mut opponent: ResMut<Opponent>,
@@ -1520,14 +1521,17 @@ pub fn on_gateway_request(
                 return;
             }
             info!("Gateway matched us with {opponent_peer}; dialing via {addresses:?}");
-            // A LAN pairing (if any) gives way to the gateway's match.
-            if let Some(old) = pre.opponent {
-                info!("Discarding LAN pairing with {old} for the gateway match");
-                let _ = channels.commands.send(NetCommand::SendRequest {
-                    peer: old,
-                    request: GameRequest::DeclineMatch,
-                });
-                pre.cancel();
+            // First-come, first-served: a client may only have one pending
+            // pairing at a time, so ignore a fresh MatchFound while one is
+            // still open (its window will time out on its own). Ignore one
+            // entirely while we are already playing a match.
+            if *state == AppState::Playing {
+                info!("Already in a match; ignoring MatchFound for {opponent_peer}");
+                return;
+            }
+            if let Some(already) = pre.opponent {
+                info!("Already pending a match with {already}; ignoring MatchFound for {opponent_peer}");
+                return;
             }
             pre.begin(opponent_peer);
             opponent.0 = Some(opponent_peer);
@@ -1658,6 +1662,14 @@ pub fn on_game_request(
             *intent = MatchIntent::Idle;
             start_match(*peer, &state, &mut next, &mut pending, &local, &mut is_host);
         }
+        GameRequest::MatchAbort => {
+            info!("{peer} ended the match; back to menu");
+            opponent.0 = None;
+            pending.0 = None;
+            if *state == AppState::Playing {
+                next.set(AppState::Menu);
+            }
+        }
         GameRequest::MigrateHost(snapshot) => {
             info!("{peer} transferred host authority to us");
             opponent.0 = Some(*peer);
@@ -1738,33 +1750,28 @@ pub fn enter_pending_match(
     }
 }
 
-/// Leave the current match (ESCAP) and return to the menu. If we are the host,
-/// hand the current authoritative state to the guest first (M4/M7) so the
-/// match can survive our departure.
+/// Leave the current match (ESCAP) and return to the menu. The opponent is told
+/// the match ended so both sides go back to the lobby instead of letting one
+/// side keep a host simulation running against an empty field.
 #[allow(clippy::too_many_arguments)]
 pub fn leave_match(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     state: Res<State<AppState>>,
-    is_host: Res<IsHost>,
     mut next: ResMut<NextState<AppState>>,
     opponent: Res<Opponent>,
     mut pending: ResMut<PendingMatch>,
-    sim: Option<Res<MatchSim>>,
     channels: Res<NetChannels>,
 ) {
     if !keyboard_input.just_pressed(KeyCode::Escape) {
         return;
     }
     if *state == AppState::Playing
-        && is_host.0
-        && let Some(sim) = &sim
         && let Some(peer) = opponent.0
     {
-        let snapshot = sim::build_host_snapshot(sim);
-        info!("Migrating host to {peer}");
+        info!("Ending the match with {peer}");
         let _ = channels.commands.send(NetCommand::SendRequest {
             peer,
-            request: GameRequest::MigrateHost(snapshot),
+            request: GameRequest::MatchAbort,
         });
     }
     info!("Leaving the match");
@@ -1772,9 +1779,9 @@ pub fn leave_match(
     next.set(AppState::Menu);
 }
 
-/// If the opponent drops, abandon the match (and any queued rematch) — unless
-/// we are the guest and the HOST dropped, in which case we take over the
-/// simulation (M7) instead of returning to the menu.
+/// Leave the match (and any queued rematch) when the opponent drops. No host
+/// migration: with the opponent gone there is nobody to play, so both sides
+/// return to the menu.
 #[allow(clippy::too_many_arguments)]
 pub fn on_peer_disconnected(
     ev: On<NetEvent>,
@@ -1782,25 +1789,12 @@ pub fn on_peer_disconnected(
     mut next: ResMut<NextState<AppState>>,
     mut opponent: ResMut<Opponent>,
     mut pending: ResMut<PendingMatch>,
-    mut is_host: ResMut<IsHost>,
-    world: Res<RemoteWorld>,
-    sim: Option<Res<MatchSim>>,
-    channels: Res<NetChannels>,
-    mut commands: Commands,
     mut reconn: ResMut<ReconnectionState>,
 ) {
     let NetEvent::PeerDisconnected(peer) = ev.event() else {
         return;
     };
     if opponent.0 != Some(*peer) {
-        return;
-    }
-
-    if *state == AppState::Playing && !is_host.0 && sim.is_none() {
-        info!("Opponent {peer} disconnected; migrating to host");
-        is_host.0 = true;
-        let seed = world.curr;
-        sim::start_seeded_match_sim(&mut commands, &is_host, &opponent, &channels, seed);
         return;
     }
 

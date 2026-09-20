@@ -72,6 +72,9 @@ pub enum Request {
     DeclineMatch,
     /// Confirms the match to the challenger and tells them to start playing.
     MatchStart,
+    /// The peer ended the match (ESC): both sides leave the game and return to
+    /// the menu instead of migrating the host or starting a rematch.
+    MatchAbort,
     /// Push a fresh authoritative snapshot to the other side.
     State(GameSnapshot),
     /// The host hands authority (and its last authoritative snapshot) to the
