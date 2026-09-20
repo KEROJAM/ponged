@@ -16,7 +16,8 @@ use crate::networking::{GatewayState, NetChannels, NetCommand, NetEvent, short_p
 use crate::networking_demo::{IsHost, Peers, RemoteWorld};
 use crate::sim::{self, MatchSim};
 use ponged::protocol::{
-    next_rank_name, rank_progress, GatewayRequest, GatewayResponse, Request as GameRequest,
+    next_rank_name, rank_for_rating, rank_progress, GatewayRequest, GatewayResponse,
+    Request as GameRequest,
 };
 
 /// Default gateway address to dial. Override with `PONG_GATEWAY`.
@@ -237,6 +238,12 @@ const PREMATCH_COUNTDOWN_SECS: f32 = 5.0;
 /// instantly re-pair with the same player on the gateway.
 const PREMATCH_RESUME_SECS: f32 = 8.0;
 
+/// How long we wait on a dropped opponent connection before abandoning a
+/// match. Relay circuits over NAT frequently blip for a second or two and then
+/// re-establish by themselves; abandoning instantly turns every such blip into
+/// a free (and unreportable) "result".
+const RECONNECT_GRACE_SECS: f32 = 5.0;
+
 /// A pending pairing that is waiting for both players to press "Aceptar" (M6).
 /// After a gateway `MatchFound` or a LAN `InviteToPlay` we show a dialog; the
 /// match only starts once both sides send [`GameRequest::AcceptMatch`] and the
@@ -436,7 +443,7 @@ pub struct SettingsVsyncToggle;
 #[derive(Component)]
 pub struct SettingsVsyncLabel;
 
-/// Loads persisted settings at startup and seeds the username resource.
+/// Loads persisted settings at startup and seeds the username + ELO resources.
 pub fn load_settings(mut commands: Commands, mut history: ResMut<MatchHistory>) {
     history.ensure_open();
     let stored = history.load_username().filter(|n| !n.trim().is_empty());
@@ -444,6 +451,23 @@ pub fn load_settings(mut commands: Commands, mut history: ResMut<MatchHistory>) 
     commands.insert_resource(Username(username));
     commands.insert_resource(NeedsOnboarding(stored.is_none()));
     info!("Local username: {:?}", stored);
+
+    // The client is the source of truth for ELO: seed the gateway state from
+    // the locally-kept, gateway-signed rating proof so the menu (and the next
+    // Register) never wait on — or depend on — a gateway's SQLite surviving
+    // an outage.
+    let proof = history.load_rating_proof();
+    let rating = proof
+        .as_ref()
+        .map(|p| p.rating)
+        .unwrap_or_else(|| history.load_rating());
+    commands.insert_resource(GatewayState {
+        rating,
+        rank: Some(rank_for_rating(rating).to_string()),
+        proof,
+        ..Default::default()
+    });
+    info!("Local ELO rating: {rating} ({})", rank_for_rating(rating));
 
     // Load gateway addresses from assets/gateways.json, env var, or default.
     let gw_addr = load_gateway_addresses();
@@ -1435,6 +1459,8 @@ pub fn on_relay_reservation(
             peer: *relay_peer,
             request: GatewayRequest::Register {
                 username: username.0.clone(),
+                rating: gateway.rating,
+                proof: gateway.proof.clone(),
             },
         });
         let _ = channels.commands.send(NetCommand::RendezvousRegister {
@@ -1450,6 +1476,7 @@ pub fn on_gateway_response(
     mut gateway: ResMut<GatewayState>,
     search: Res<AutoSearch>,
     channels: Res<NetChannels>,
+    history: ResMut<MatchHistory>,
 ) {
     let NetEvent::GatewayResponse { peer, response } = ev.event() else {
         return;
@@ -1459,10 +1486,16 @@ pub fn on_gateway_response(
             username,
             rating,
             rank,
+            proof,
         } => {
             info!("Registered on gateway as {username} (rating {rating}, rank {rank})");
             gateway.rank = Some(rank.clone());
             gateway.rating = *rating;
+            history.save_rating(*rating);
+            if let Some(proof) = proof {
+                gateway.proof = Some(proof.clone());
+                history.save_rating_proof(proof);
+            }
             gateway.queued = false;
             if search.0 {
                 let _ = channels.commands.send(NetCommand::SendGatewayRequest {
@@ -1479,10 +1512,15 @@ pub fn on_gateway_response(
             info!("Left the matchmaking queue");
             gateway.queued = false;
         }
-        GatewayResponse::Rating { rating, rank } => {
+        GatewayResponse::Rating { rating, rank, proof } => {
             info!("Gateway rating is now {rating} (rank {rank})");
             gateway.rank = Some(rank.clone());
             gateway.rating = *rating;
+            history.save_rating(*rating);
+            if let Some(proof) = proof {
+                gateway.proof = Some(proof.clone());
+                history.save_rating_proof(proof);
+            }
         }
         GatewayResponse::Pong => {}
         GatewayResponse::Error(err) => {
@@ -1703,8 +1741,13 @@ pub fn on_enter_playing(
     mut search: ResMut<AutoSearch>,
     gateway: Res<GatewayState>,
     channels: Res<NetChannels>,
+    mut reconn: ResMut<ReconnectionState>,
 ) {
     search.0 = false;
+    // A fresh match always starts with a clean reconnection state.
+    reconn.active = false;
+    reconn.countdown = None;
+    reconn.target = None;
     if gateway.queued
         && let Some(peer) = gateway.peer
     {
@@ -1779,13 +1822,16 @@ pub fn leave_match(
     next.set(AppState::Menu);
 }
 
-/// Leave the match (and any queued rematch) when the opponent drops. No host
-/// migration: with the opponent gone there is nobody to play, so both sides
-/// return to the menu.
+/// Leave the match when the opponent drops. No host migration: with the
+/// opponent gone there is nobody to play, so both sides return to the menu. An
+/// abrupt drop mid-match first waits out [`RECONNECT_GRACE_SECS`] in case the
+/// relay circuit re-establishes (it usually does within a second); only if the
+/// opponent has not come back by then do we abandon the match.
 #[allow(clippy::too_many_arguments)]
 pub fn on_peer_disconnected(
     ev: On<NetEvent>,
     state: Res<State<AppState>>,
+    match_over: Res<crate::sim::MatchOver>,
     mut next: ResMut<NextState<AppState>>,
     mut opponent: ResMut<Opponent>,
     mut pending: ResMut<PendingMatch>,
@@ -1798,12 +1844,21 @@ pub fn on_peer_disconnected(
         return;
     }
 
+    // A settled match (or one already finished) is left right away and its
+    // result recorded on exit. A mid-match drop waits for the relay circuit to
+    // come back instead of ending the game on the first network blip.
+    if *state == AppState::Playing && !match_over.0 {
+        info!("Opponent {peer} connection dropped; waiting {RECONNECT_GRACE_SECS:.0}s for the circuit to come back");
+        pending.0 = None;
+        reconn.target = Some(*peer);
+        reconn.active = true;
+        reconn.countdown = Some(Timer::from_seconds(RECONNECT_GRACE_SECS, TimerMode::Once));
+        return;
+    }
+
     info!("Opponent {peer} disconnected, back to menu");
     pending.0 = None;
     if *state == AppState::Playing {
-        reconn.target = Some(*peer);
-        reconn.active = true;
-        reconn.countdown = Some(Timer::from_seconds(10.0, TimerMode::Once));
         next.set(AppState::Menu);
     } else {
         opponent.0 = None;
@@ -1845,16 +1900,21 @@ fn fetch_latest_version() -> Result<(String, String), Box<dyn std::error::Error>
 
 // --- Chat system -----------------------------------------------------------
 
-/// Sends a chat message to all connected peers.
+/// Sends a chat message to all connected peers (gateways are skipped: they
+/// don't speak the game protocol, so sending to them just fails).
 pub fn send_chat_message(
     text: String,
     peers: &Peers,
+    gateway: &GatewayState,
     channels: &NetChannels,
 ) {
     if text.trim().is_empty() {
         return;
     }
     for peer in &peers.0 {
+        if gateway.peer == Some(*peer) || gateway.known.contains(peer) {
+            continue;
+        }
         let _ = channels.commands.send(NetCommand::SendRequest {
             peer: *peer,
             request: GameRequest::Chat { text: text.clone() },
@@ -1872,6 +1932,7 @@ pub fn update_chat(
     mut chat_buffer: ResMut<ChatBuffer>,
     username: Res<Username>,
     peers: Res<Peers>,
+    gateway: Res<GatewayState>,
     channels: Res<NetChannels>,
     mut chat_input: Single<&mut EditableText, With<ChatInput>>,
     mut chat_root: Single<&mut Node, (With<ChatRoot>, Without<ChatReopenButton>)>,
@@ -1926,7 +1987,7 @@ pub fn update_chat(
                 is_local: true,
             });
             // Send to all peers
-            send_chat_message(text, &peers, &channels);
+            send_chat_message(text, &peers, &gateway, &channels);
             // Clear input via edits (keeps focus and cursor intact)
             chat_input.queue_edit(TextEdit::SelectAll);
             chat_input.queue_edit(TextEdit::Delete);
@@ -2258,8 +2319,11 @@ fn start_search(
                 reserved: false,
                 queued: false,
                 peer: None,
-                rank: None,
-                rating: 0,
+                // Rating + proof + rank live on the client (seeded at startup)
+                // and must survive re-dialing a gateway, so keep them.
+                rank: gateway.rank.clone(),
+                rating: gateway.rating,
+                proof: gateway.proof.clone(),
                 // Gateways identified earlier in the session stay flagged as
                 // such even while we re-dial the active one.
                 known: gateway.known.clone(),
@@ -2273,6 +2337,8 @@ fn start_search(
                 peer,
                 request: GatewayRequest::Register {
                     username: username.0.clone(),
+                    rating: gateway.rating,
+                    proof: gateway.proof.clone(),
                 },
             });
         }
@@ -2542,7 +2608,11 @@ pub fn update_options(
                     {
                         let _ = channels.commands.send(NetCommand::SendGatewayRequest {
                             peer,
-                            request: GatewayRequest::Register { username: name },
+                            request: GatewayRequest::Register {
+                                username: name,
+                                rating: gateway.rating,
+                                proof: gateway.proof.clone(),
+                            },
                         });
                     }
                 }
@@ -2687,7 +2757,11 @@ pub fn update_onboarding(
         {
             let _ = channels.commands.send(NetCommand::SendGatewayRequest {
                 peer,
-                request: GatewayRequest::Register { username: name },
+                request: GatewayRequest::Register {
+                    username: name,
+                    rating: gateway.rating,
+                    proof: gateway.proof.clone(),
+                },
             });
         }
     }
@@ -2878,21 +2952,44 @@ pub fn update_node_graph(
 
 // --- Reconnection system ---------------------------------------------------
 
-/// Handles reconnection attempts when a peer disconnects during a match.
+/// Handles reconnection attempts when a peer disconnects during a match. Keeps
+/// the match on screen for [`RECONNECT_GRACE_SECS`]; if the circuit doesn't
+/// come back in time, abandons the match and returns to the menu (an unfinished
+/// match records no result). If the same opponent reconnects first, the
+/// abandonment is cancelled by `on_peer_connected` and play resumes.
 pub fn update_reconnection(
     mut reconn: ResMut<ReconnectionState>,
+    mut next: ResMut<NextState<AppState>>,
+    state: Res<State<AppState>>,
+    opponent: Res<Opponent>,
+    mut pending: ResMut<PendingMatch>,
     time: Res<Time>,
 ) {
-    let Some(target) = reconn.target else { return };
-    if !reconn.active { return; }
-
-    if let Some(ref mut countdown) = reconn.countdown {
-        countdown.tick(time.delta());
-        if countdown.just_finished() {
-            info!("Reconnection to {target} timed out");
-            reconn.active = false;
-            reconn.target = None;
-            return;
+    let Some(target) = reconn.target else {
+        return;
+    };
+    if !reconn.active {
+        return;
+    }
+    // Stale state (e.g. a fresh match against someone else) must never
+    // abandon a match it doesn't belong to.
+    if opponent.0 != Some(target) {
+        reconn.active = false;
+        reconn.countdown = None;
+        reconn.target = None;
+        return;
+    }
+    let Some(ref mut countdown) = reconn.countdown else {
+        return;
+    };
+    countdown.tick(time.delta());
+    if countdown.just_finished() {
+        info!("Opponent {target} did not come back; abandoning the match");
+        reconn.active = false;
+        reconn.target = None;
+        pending.0 = None;
+        if *state == AppState::Playing {
+            next.set(AppState::Menu);
         }
     }
 }

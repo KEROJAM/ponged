@@ -104,13 +104,64 @@ pub enum Response {
 /// direct TCP address or a `/p2p-circuit` relayed address through the gateway).
 pub type Addr = String;
 
+/// Rating a brand-new player starts with (inside the Brick tier, < 1000).
+///
+/// The client, not the gateway, is the source of truth for a player's ELO: it
+/// persists the rating locally, sends it at `Register`, and stores whatever the
+/// gateway computes back after each match. The gateway keeps a cached copy in
+/// SQLite but never outlives a client restart (its key is the ephemeral
+/// `PeerId`), so it is never authoritative.
+pub const DEFAULT_RATING: i32 = 800;
+
+fn default_rating() -> i32 {
+    DEFAULT_RATING
+}
+
+/// A rating certified by a gateway.
+///
+/// When a gateway accepts — or computes — a rating, it signs
+/// `rating ‖ seq ‖ <client PeerId>` with the matchmaking keypair. Players
+/// keep the newest proof they received in their local history, so a later
+/// gateway (or the same one after losing its SQLite) can trust the claim
+/// without its own database. Gateways in a deployment that share the same
+/// key file can all verify each other's proofs.
+///
+/// `seq` is a per-player counter that increases every time a proof is issued;
+/// seeing a higher `seq` never regresses a rating, which prevents players from
+/// replaying an old, higher proof after losing matches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RatingProof {
+    pub rating: i32,
+    /// Monotonic counter; the client always keeps (and presents) its highest.
+    pub seq: u64,
+    /// Base58 `PeerId` of the gateway that issued it (informational — the
+    /// verifying gateway checks the signature with its own keypair).
+    pub gateway: String,
+    /// ed25519 signature over `rating ‖ seq ‖ client PeerId` (see gateway).
+    pub signature: Vec<u8>,
+}
+
+fn default_no_proof() -> Option<RatingProof> {
+    None
+}
+
 /// RPC requests the game (client) sends to the gateway over
 /// [`GATEWAY_PROTOCOL`], plus the one the gateway *pushes* back to announce a
 /// reserved match.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GatewayRequest {
-    /// Tell the gateway who we are. Creates the rating entry on first contact.
-    Register { username: String },
+    /// Tell the gateway who we are and hand over our current ELO (which the
+    /// client keeps locally). Creates the rating entry on first contact.
+    /// Older clients omit `rating` (falls back to [`DEFAULT_RATING`]); the
+    /// optional `proof` is a gateway-signed certificate that lets a new —
+    /// or freshly-started — gateway trust the claimed rating.
+    Register {
+        username: String,
+        #[serde(default = "default_rating")]
+        rating: i32,
+        #[serde(default = "default_no_proof")]
+        proof: Option<RatingProof>,
+    },
     /// Put us in the matchmaking queue (matched against peers of similar ELO).
     QueueMatch,
     /// Leave the matchmaking queue.
@@ -136,10 +187,14 @@ pub enum GatewayRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GatewayResponse {
     /// `username`, current rating and rank after [`GatewayRequest::Register`].
+    /// `proof` certifies the accepted rating; clients store it as their new
+    /// ledger entry (absent when talking to a gateway too old to sign).
     Registered {
         username: String,
         rating: i32,
         rank: String,
+        #[serde(default = "default_no_proof")]
+        proof: Option<RatingProof>,
     },
     /// Currently queued; `position` is the number of players ahead of us.
     Queued {
@@ -147,10 +202,13 @@ pub enum GatewayResponse {
     },
     /// Left the queue.
     Dequeued,
-    /// The gateway's view of our rating and rank after a report.
+    /// The gateway's view of our rating and rank after a report, plus the
+    /// freshly-signed `proof` certifying it.
     Rating {
         rating: i32,
         rank: String,
+        #[serde(default = "default_no_proof")]
+        proof: Option<RatingProof>,
     },
     Pong,
     Error(String),
@@ -346,5 +404,79 @@ mod tests {
         let bytes = cbor4ii::serde::to_vec(Vec::new(), &req).expect("serialize");
         let decoded: GatewayRequest = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn register_carries_client_rating() {
+        let req = GatewayRequest::Register {
+            username: "pongster".into(),
+            rating: 1234,
+            proof: None,
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &req).expect("serialize");
+        let decoded: GatewayRequest = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn register_carries_rating_proof() {
+        let proof = RatingProof {
+            rating: 1234,
+            seq: 7,
+            gateway: "12D3KooProof".into(),
+            signature: vec![0xde, 0xad, 0xbe, 0xef],
+        };
+        let req = GatewayRequest::Register {
+            username: "pongster".into(),
+            rating: 1234,
+            proof: Some(proof.clone()),
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &req).expect("serialize");
+        let decoded: GatewayRequest = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(
+            decoded,
+            GatewayRequest::Register {
+                username: "pongster".into(),
+                rating: 1234,
+                proof: Some(proof),
+            }
+        );
+    }
+
+    #[test]
+    fn rating_proof_roundtrips() {
+        let proof = RatingProof {
+            rating: 1500,
+            seq: 3,
+            gateway: "12D3KooProof".into(),
+            signature: vec![1, 2, 3, 4, 5],
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &proof).expect("serialize");
+        let decoded: RatingProof = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, proof);
+    }
+
+    #[test]
+    fn register_without_rating_defaults_to_800() {
+        // Simulates an older client that predates the `rating` field: it must
+        // deserialize with the local default so a fresh server never loses
+        // the player's stored ELO.
+        #[derive(Serialize)]
+        enum OldGatewayRequest {
+            Register { username: String },
+        }
+        let old = OldGatewayRequest::Register {
+            username: "vintage".into(),
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &old).expect("serialize");
+        let decoded: GatewayRequest = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(
+            decoded,
+            GatewayRequest::Register {
+                username: "vintage".into(),
+                rating: DEFAULT_RATING,
+                proof: None,
+            }
+        );
     }
 }

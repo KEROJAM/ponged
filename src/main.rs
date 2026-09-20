@@ -695,6 +695,7 @@ mod networking_demo {
         pre: ResMut<crate::menu::PreMatch>,
         username: Res<crate::menu::Username>,
         channels: Res<NetChannels>,
+        mut reconn: ResMut<crate::menu::ReconnectionState>,
     ) {
         if let NetEvent::PeerConnected(peer) = ev.event() {
             let is_matched = gateway_match.0 == Some(*peer);
@@ -707,6 +708,14 @@ mod networking_demo {
                         name: username.0.clone(),
                     },
                 });
+            }
+            // A mid-match drop whose relay circuit came back within the grace
+            // window: cancel the pending abandonment and keep playing.
+            if reconn.active && reconn.target == Some(*peer) {
+                info!("Opponent {peer} reconnected; resuming the match");
+                reconn.active = false;
+                reconn.countdown = None;
+                reconn.target = None;
             }
             // M6: the opponent the gateway matched us with connected. The match
             // itself is gated by the pre-match dialog; flush an acceptance that
@@ -766,9 +775,10 @@ mod networking_demo {
         time: Res<Time>,
         mut timer: ResMut<SnapshotTimer>,
         channels: Res<NetChannels>,
-        peers: Res<Peers>,
         host: Res<IsHost>,
         world: Res<RemoteWorld>,
+        rival: Res<crate::menu::Opponent>,
+        reconn: Res<crate::menu::ReconnectionState>,
         player: Single<&Position, (With<Player>, Without<Opponent>)>,
         opponent: Single<&Position, (With<Opponent>, Without<Player>)>,
         ball: Single<&Position, With<Ball>>,
@@ -779,6 +789,19 @@ mod networking_demo {
         if !timer.0.tick(time.delta()).just_finished() {
             return;
         }
+        // While an opponent drop is being given a reconnect grace window the
+        // peer is gone; pushing snapshots to it would just fail, so stay quiet
+        // until the circuit re-establishes (or the match is abandoned).
+        if reconn.active {
+            return;
+        }
+        // Push state only to the peer we're actually playing against. The
+        // gateway (and any other lobby peer we're connected to) never speaks
+        // `/pong/state/1.0.0`, so broadcasting to every connected peer just
+        // produces a `UnsupportedProtocols` failure on every tick.
+        let Some(rival) = rival.0 else {
+            return;
+        };
 
         let snapshot = GameSnapshot {
             seq: seq.0,
@@ -794,12 +817,10 @@ mod networking_demo {
         };
         seq.0 += 1;
 
-        for peer in &peers.0 {
-            let _ = channels.commands.send(NetCommand::SendRequest {
-                peer: *peer,
-                request: Request::State(snapshot),
-            });
-        }
+        let _ = channels.commands.send(NetCommand::SendRequest {
+            peer: rival,
+            request: Request::State(snapshot),
+        });
     }
 
     fn lerp(prev: Point2, curr: Point2, t: f32) -> Point2 {

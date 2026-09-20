@@ -22,7 +22,7 @@ use crate::Score;
 use crate::menu::Opponent;
 use crate::networking::{GatewayState, NetChannels, NetCommand, short_peer};
 use crate::networking_demo::{IsHost, RemoteWorld};
-use ponged::protocol::GatewayRequest;
+use ponged::protocol::{GatewayRequest, RatingProof, DEFAULT_RATING};
 
 /// How many past matches the ranking panel shows.
 const HISTORY_LIMIT: usize = 10;
@@ -156,30 +156,74 @@ impl MatchHistory {
 
     /// Reads the stored display name, if any.
     pub fn load_username(&self) -> Option<String> {
-        let db = self.db.as_ref()?;
-        let conn = db.lock().ok()?;
-        let mut stmt = conn
-            .prepare("SELECT value FROM settings WHERE key = 'username'")
-            .ok()?;
-        let mut rows = stmt.query_map([], |row| row.get(0)).ok()?;
-        rows.next().and_then(Result::ok)
+        self.settings_value("username")
     }
 
     /// Persists the display name.
     pub fn save_username(&self, name: &str) {
-        let Some(db) = &self.db else {
-            return;
-        };
-        let Ok(conn) = db.lock() else {
-            return;
-        };
-        if let Err(e) = conn.execute(
-            "INSERT INTO settings (key, value) VALUES ('username', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [name],
-        ) {
+        if let Err(e) = self.write_setting("username", name) {
             warn!("Could not save username: {e}");
         }
+    }
+
+    /// Reads the locally-kept ELO rating. The client is the source of truth
+    /// for ELO: it never depends on the gateway's SQLite for continuity.
+    pub fn load_rating(&self) -> i32 {
+        let stored = self.settings_value("rating");
+        stored
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(DEFAULT_RATING)
+    }
+
+    /// Persists the ELO rating (updated after each reported match).
+    pub fn save_rating(&self, rating: i32) {
+        if let Err(e) = self.write_setting("rating", &rating.to_string()) {
+            warn!("Could not save rating: {e}");
+        }
+    }
+
+    /// Reads the newest gateway-signed rating proof kept locally, if any.
+    /// Stored hex-encoded, since the settings table only holds text.
+    pub fn load_rating_proof(&self) -> Option<RatingProof> {
+        let stored = self.settings_value("rating_proof")?;
+        let bytes = decode_hex(&stored)?;
+        cbor4ii::serde::from_slice(&bytes).ok()
+    }
+
+    /// Persists a gateway-signed rating proof (hex-encoded CBOR).
+    pub fn save_rating_proof(&self, proof: &RatingProof) {
+        let Ok(bytes) = cbor4ii::serde::to_vec(Vec::new(), proof) else {
+            return;
+        };
+        if let Err(e) = self.write_setting("rating_proof", &encode_hex(&bytes)) {
+            warn!("Could not save rating proof: {e}");
+        }
+    }
+
+    fn settings_value(&self, key: &str) -> Option<String> {
+        let db = self.db.as_ref()?;
+        let conn = db.lock().ok()?;
+        let mut stmt = conn
+            .prepare("SELECT value FROM settings WHERE key = ?1")
+            .ok()?;
+        let mut rows = stmt.query_map([key], |row| row.get(0)).ok()?;
+        rows.next().and_then(Result::ok)
+    }
+
+    fn write_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        let Some(db) = &self.db else {
+            return Ok(());
+        };
+        let Ok(conn) = db.lock() else {
+            return Err("settings lock poisoned".to_string());
+        };
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -190,7 +234,10 @@ pub fn arm_record(mut history: ResMut<MatchHistory>) {
 }
 
 /// Records the finished match on exit from `Playing` (M9) and reports the
-/// result to the gateway for ELO updates.
+/// result to the gateway for ELO updates. Only matches that actually reached
+/// the win threshold are recorded/reported: an abandoned match (opponent
+/// disconnected, ESC before `WIN_SCORE`, `MatchAbort`) has no verifiable
+/// outcome and must not move anyone's rating.
 pub fn record_match(
     mut history: ResMut<MatchHistory>,
     host: Res<IsHost>,
@@ -198,6 +245,7 @@ pub fn record_match(
     world: Res<RemoteWorld>,
     opponent: Res<Opponent>,
     gateway: Res<GatewayState>,
+    match_over: Res<crate::sim::MatchOver>,
     channels: Res<NetChannels>,
 ) {
     if !history.armed {
@@ -207,6 +255,11 @@ pub fn record_match(
     history.ensure_open();
     let Some(db) = &history.db else { return };
     let Some(rival) = opponent.0 else { return };
+
+    if !match_over.0 {
+        info!("Match ended without a winner; result discarded");
+        return;
+    }
 
     // The guest's Score resource stays 0/0 (it renders the host's state), so
     // its result is taken from the last authoritative snapshot. Scores there
@@ -251,4 +304,21 @@ pub fn record_match(
 pub fn refresh_on_menu(mut history: ResMut<MatchHistory>) {
     history.ensure_open();
     history.reload();
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    let bytes: Vec<u8> = hex
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).ok().and_then(|s| u8::from_str_radix(s, 16).ok()))
+        .collect::<Option<_>>()?;
+    (bytes.len() == hex.len() / 2).then_some(bytes)
 }

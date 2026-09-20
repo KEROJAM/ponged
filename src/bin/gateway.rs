@@ -6,9 +6,14 @@
 //!   * **Rendezvous server**: the shared discovery point where clients
 //!     publish/query each other.
 //!   * **Kademlia server**: a DHT bootstrap node for discovery fallback.
-//!   * **Matchmaking**: an ELO-rating queue (persisted in SQLite) that pairs
+//!   * **Matchmaking**: an ELO-rating queue that pairs
 //!     clients and pushes them `GatewayRequest::MatchFound` with dialable
 //!     relayed circuit addresses for their opponent.
+//!   * **Signed rating ledger**: the gateway certifies every rating it accepts
+//!     or computes by signing `rating ‖ seq ‖ <player peer id>` with its
+//!     keypair (see [`RatingProof`]). Clients keep the newest proof locally, so
+//!     a gateway that loses its SQLite — or a new gateway sharing the same
+//!     `--key` file — can recover every player's ELO from their own claims.
 //!
 //! Client ↔ gateway RPC flows over the [`GATEWAY_PROTOCOL`] cbor channel
 //! (`Register` → `QueueMatch` → gateway pushes `MatchFound` → both sides dial
@@ -39,7 +44,8 @@ use libp2p::{
     Multiaddr, PeerId, SwarmBuilder, identify, kad, noise, ping, relay, rendezvous, tcp, yamux,
 };
 use ponged::protocol::{
-    GATEWAY_AGENT_VERSION, GATEWAY_PROTOCOL, GatewayRequest, GatewayResponse, rank_for_rating,
+    DEFAULT_RATING, GATEWAY_AGENT_VERSION, GATEWAY_PROTOCOL, GatewayRequest, GatewayResponse,
+    RatingProof, rank_for_rating,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::time::MissedTickBehavior;
@@ -47,7 +53,9 @@ use tokio::time::MissedTickBehavior;
 const DEFAULT_LISTEN: &str = "/ip4/0.0.0.0/tcp/4001";
 const DEFAULT_HOST_FALLBACK: &str = "127.0.0.1";
 /// Rating granted to new players — inside the Brick range (< 1000).
-const START_RATING: i32 = 800;
+/// Mirrors the client's local default; the client is the ELO source of truth
+/// and always reports its stored rating at `Register`.
+const START_RATING: i32 = DEFAULT_RATING;
 /// Do not pair players whose ELO differs by more than this.
 const MAX_ELO_GAP: i32 = 600;
 /// How often the matchmaking queue is scanned for pairs.
@@ -88,6 +96,9 @@ struct Behaviour {
 struct PlayerEntry {
     username: Option<String>,
     rating: i32,
+    /// Highest proof sequence this player has been certified with; used to
+    /// reject replayed (older, possibly higher) proofs.
+    last_seq: u64,
     /// Gateway base addresses (no `/p2p-circuit` suffix) usable to build a
     /// relayed route to this player, from that player's own vantage.
     base_addresses: Vec<Multiaddr>,
@@ -139,6 +150,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("  public  : {public_host}");
 
     let mut rating_db = open_ratings(&db_path)?;
+
+    // The signing key certifies every rating we issue; clients keep the proofs
+    // and re-present them, so losing the DB never costs a player their ELO.
+    let signing_key = keypair.clone();
 
     let mut swarm = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
@@ -207,8 +222,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     println!("client connected: {peer_id}");
+                    let (stored_rating, stored_seq) =
+                        load_rating(&rating_db, &peer_id).unwrap_or((START_RATING, 0));
                     let entry = players.entry(peer_id).or_insert_with(|| PlayerEntry {
-                        rating: load_rating(&rating_db, &peer_id).unwrap_or(START_RATING),
+                        rating: stored_rating,
+                        last_seq: stored_seq,
                         ..Default::default()
                     });
                     // We don't know the client's path to us yet; seed with the
@@ -235,8 +253,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 entry.base_addresses.push(info.observed_addr);
                             }
                             if entry.rating == 0 {
-                                entry.rating =
-                                    load_rating(&rating_db, &peer_id).unwrap_or(START_RATING);
+                                let (rating, seq) =
+                                    load_rating(&rating_db, &peer_id).unwrap_or((START_RATING, 0));
+                                entry.rating = rating;
+                                entry.last_seq = entry.last_seq.max(seq);
                             }
                         }
                     }
@@ -246,7 +266,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         ..
                     }) => {
                         on_gateway_request(
-                            &mut swarm, &mut players, &mut queue, &mut rating_db, peer, request, channel,
+                            &mut swarm,
+                            &mut players,
+                            &mut queue,
+                            &mut rating_db,
+                            &signing_key,
+                            &gateway_peer,
+                            peer,
+                            request,
+                            channel,
                         );
                     }
                     BehaviourEvent::Gateway(request_response::Event::Message {
@@ -328,34 +356,88 @@ fn open_ratings(path: &PathBuf) -> Result<Connection, Box<dyn std::error::Error 
     let conn = Connection::open(path)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS players (
-            peer_id  TEXT PRIMARY KEY,
-            username TEXT NOT NULL,
-            rating   INTEGER NOT NULL DEFAULT 800
+            peer_id   TEXT PRIMARY KEY,
+            username  TEXT NOT NULL,
+            rating    INTEGER NOT NULL DEFAULT 800,
+            rating_seq INTEGER NOT NULL DEFAULT 0
         );",
     )?;
+    // Migrate databases created before the proof-sequence column existed.
+    let has_seq = conn
+        .prepare("SELECT 1 FROM pragma_table_info('players') WHERE name = 'rating_seq'")?
+        .query_row([], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if !has_seq {
+        conn.execute(
+            "ALTER TABLE players ADD COLUMN rating_seq INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(conn)
 }
 
-fn load_rating(conn: &Connection, peer: &PeerId) -> Option<i32> {
+fn load_rating(conn: &Connection, peer: &PeerId) -> Option<(i32, u64)> {
     conn.query_row(
-        "SELECT rating FROM players WHERE peer_id = ?1",
+        "SELECT rating, rating_seq FROM players WHERE peer_id = ?1",
         params![peer.to_base58()],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
     .ok()
     .flatten()
 }
 
-fn upsert_rating(conn: &mut Connection, peer: &PeerId, username: &str, rating: i32) {
+fn upsert_rating(conn: &mut Connection, peer: &PeerId, username: &str, rating: i32, seq: u64) {
     let result = conn.execute(
-        "INSERT INTO players (peer_id, username, rating) VALUES (?1, ?2, ?3)
-         ON CONFLICT(peer_id) DO UPDATE SET username = excluded.username, rating = excluded.rating",
-        params![peer.to_base58(), username, rating],
+        "INSERT INTO players (peer_id, username, rating, rating_seq) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(peer_id) DO UPDATE SET
+            username = excluded.username,
+            rating = excluded.rating,
+            rating_seq = excluded.rating_seq",
+        params![peer.to_base58(), username, rating, seq],
     );
     if let Err(e) = result {
         println!("rating persist error for {peer}: {e}");
     }
+}
+
+/// Signed proof payload: `rating ‖ seq ‖ client-peer-id`. The client's peer
+/// id binds the proof to its holder (its identity is a persistent key) so a
+/// proof can't be handed to a different player.
+fn proof_message(rating: i32, seq: u64, client: &PeerId) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(4 + 8 + client.to_bytes().len());
+    msg.extend_from_slice(&rating.to_be_bytes());
+    msg.extend_from_slice(&seq.to_be_bytes());
+    msg.extend_from_slice(&client.to_bytes());
+    msg
+}
+
+/// Certifies `rating` for `client` at sequence `seq`, or `None` if signing
+/// is unavailable (only ever happens for a broken keypair).
+fn proof_for(
+    key: &Keypair,
+    gateway: &PeerId,
+    client: &PeerId,
+    rating: i32,
+    seq: u64,
+) -> Option<RatingProof> {
+    Some(RatingProof {
+        rating,
+        seq,
+        gateway: gateway.to_base58(),
+        signature: key.sign(&proof_message(rating, seq, client)).ok()?,
+    })
+}
+
+/// Verifies a proof with the local matchmaking keypair. Gateways in one
+/// deployment share the same key file, so they can each validate the others'
+/// certificates.
+fn verify_proof(key: &Keypair, client: &PeerId, proof: &RatingProof) -> bool {
+    key.public().verify(
+        &proof_message(proof.rating, proof.seq, client),
+        &proof.signature,
+    )
 }
 
 /// Client → gateway RPC handler.
@@ -364,6 +446,8 @@ fn on_gateway_request(
     players: &mut HashMap<PeerId, PlayerEntry>,
     queue: &mut Vec<PeerId>,
     rating_db: &mut Connection,
+    signing_key: &Keypair,
+    gateway_peer: &PeerId,
     peer: PeerId,
     request: GatewayRequest,
     channel: ResponseChannel<GatewayResponse>,
@@ -378,25 +462,50 @@ fn on_gateway_request(
     };
 
     match request {
-        GatewayRequest::Register { username } => {
+        GatewayRequest::Register {
+            username,
+            proof,
+            ..
+        } => {
+            // The client owns its ELO: it presents a gateway-signed proof
+            // (kept locally), so a gateway outage never resets anyone. We
+            // trust a valid proof from the highest sequence we've seen;
+            // stale or forged proofs fall back to our cached rating, and a
+            // brand-new player starts at START_RATING.
+            let claimed = proof.as_ref().filter(|p| verify_proof(signing_key, &peer, p));
+            let accepted = match (claimed, players.get(&peer).map(|e| (e.rating, e.last_seq))) {
+                (Some(p), Some((cached_rating, cached_seq))) if p.seq <= cached_seq => {
+                    (cached_rating, cached_seq)
+                }
+                (Some(p), _) => (p.rating, p.seq),
+                (None, Some((cached_rating, cached_seq))) => (cached_rating, cached_seq),
+                (None, None) => (START_RATING, 0),
+            };
             let entry = players.entry(peer).or_insert_with(|| PlayerEntry {
                 username: Some(username.clone()),
-                rating: START_RATING,
+                rating: accepted.0,
+                last_seq: accepted.1,
                 ..Default::default()
             });
-            let stored = load_rating(rating_db, &peer).unwrap_or(START_RATING);
             entry.username = Some(username.clone());
-            entry.rating = stored;
-            upsert_rating(rating_db, &peer, &username, stored);
-            let rank = rank_for_rating(stored);
-            println!("{peer} registered as '{username}' (rating {stored}, rank {rank})");
+            entry.rating = accepted.0;
+            entry.last_seq = entry.last_seq.max(accepted.1);
+            let seq = entry.last_seq + 1;
+            upsert_rating(rating_db, &peer, &username, entry.rating, seq);
+            let signed = proof_for(signing_key, gateway_peer, &peer, entry.rating, seq);
+            let rank = rank_for_rating(entry.rating);
+            println!(
+                "{peer} registered as '{username}' (rating {}, rank {rank}, proof seq {seq})",
+                entry.rating
+            );
             reply(
                 swarm,
                 channel,
                 GatewayResponse::Registered {
                     username,
-                    rating: stored,
+                    rating: entry.rating,
                     rank: rank.to_string(),
+                    proof: signed,
                 },
             );
         }
@@ -434,29 +543,43 @@ fn on_gateway_request(
                     std::cmp::Ordering::Equal => 0.5,
                 };
                 let (new_a, new_b) = elo(my_rating, opp_rating, score_a);
+                // Bump the sequence of every rating we certify so the client's
+                // newest proof is always its highest (no rollback by replay).
                 if let Some(entry) = players.get_mut(&peer) {
                     entry.rating = new_a;
+                    entry.last_seq += 1;
                 }
                 if let Some(entry) = players.get_mut(&opponent_id) {
                     entry.rating = new_b;
+                    entry.last_seq += 1;
                 }
                 if let Some(username) = players.get(&peer).and_then(|p| p.username.clone()) {
-                    upsert_rating(rating_db, &peer, &username, new_a);
+                    let seq = players.get(&peer).map(|p| p.last_seq).unwrap_or(1);
+                    upsert_rating(rating_db, &peer, &username, new_a, seq);
                 }
                 if let Some(username) = players.get(&opponent_id).and_then(|p| p.username.clone()) {
-                    upsert_rating(rating_db, &opponent_id, &username, new_b);
+                    let seq = players
+                        .get(&opponent_id)
+                        .map(|p| p.last_seq)
+                        .unwrap_or(1);
+                    upsert_rating(rating_db, &opponent_id, &username, new_b, seq);
                 }
                 reply_rating = new_a;
                 let rank = rank_for_rating(new_a);
                 println!(
                     "{peer} reported {my_score}-{opponent_score} vs {opponent_id} → ELO {my_rating}→{new_a} (rank {rank})"
                 );
+                let proof = players
+                    .get(&peer)
+                    .map(|p| p.last_seq)
+                    .and_then(|seq| proof_for(signing_key, gateway_peer, &peer, new_a, seq));
                 reply(
                     swarm,
                     channel,
                     GatewayResponse::Rating {
                         rating: reply_rating,
                         rank: rank.to_string(),
+                        proof,
                     },
                 );
                 return;
@@ -468,6 +591,7 @@ fn on_gateway_request(
                 GatewayResponse::Rating {
                     rating: reply_rating,
                     rank: rank.to_string(),
+                    proof: None,
                 },
             );
         }
@@ -539,6 +663,59 @@ mod tests {
     #[test]
     fn new_players_start_as_brick() {
         assert_eq!(rank_for_rating(START_RATING), "Brick");
+    }
+
+    #[test]
+    fn proof_roundtrips_sign_and_verify() {
+        let key = Keypair::generate_ed25519();
+        let gateway = key.public().to_peer_id();
+        let client = Keypair::generate_ed25519().public().to_peer_id();
+        let proof = proof_for(&key, &gateway, &client, 1420, 9).expect("signs");
+        assert_eq!(proof.gateway, gateway.to_base58());
+        assert!(verify_proof(&key, &client, &proof));
+    }
+
+    #[test]
+    fn tampered_rating_is_rejected() {
+        let key = Keypair::generate_ed25519();
+        let gateway = key.public().to_peer_id();
+        let client = Keypair::generate_ed25519().public().to_peer_id();
+        let mut proof = proof_for(&key, &gateway, &client, 1420, 9).expect("signs");
+        proof.rating += 100;
+        assert!(!verify_proof(&key, &client, &proof));
+    }
+
+    #[test]
+    fn proof_bound_to_other_player_is_rejected() {
+        let key = Keypair::generate_ed25519();
+        let gateway = key.public().to_peer_id();
+        let alice = Keypair::generate_ed25519().public().to_peer_id();
+        let bob = Keypair::generate_ed25519().public().to_peer_id();
+        let proof = proof_for(&key, &gateway, &alice, 1420, 9).expect("signs");
+        assert!(!verify_proof(&key, &bob, &proof));
+    }
+
+    #[test]
+    fn replayed_old_seq_is_beat_by_cached_higher() {
+        // A client that lost matches and replays its older, higher proof must
+        // stay on the cached (higher-seq, current) rating.
+        let key = Keypair::generate_ed25519();
+        let gateway = key.public().to_peer_id();
+        let client = Keypair::generate_ed25519().public().to_peer_id();
+        let stale = proof_for(&key, &gateway, &client, 1500, 3).expect("signs");
+        // The gateway already certified this player at seq 5, rating 1200.
+        let cached_rating = 1200_i32;
+        let cached_seq = 5_u64;
+        let accepted = match (Some(&stale), Some((cached_rating, cached_seq))) {
+            (Some(p), Some((cached_rating, cached_seq))) if p.seq <= cached_seq => {
+                (cached_rating, cached_seq)
+            }
+            (Some(p), _) => (p.rating, p.seq),
+            (None, Some((rating, seq))) => (rating, seq),
+            (None, None) => (START_RATING, 0),
+        };
+        assert_eq!(accepted.0, 1200);
+        assert_eq!(accepted.1, 5);
     }
 }
 

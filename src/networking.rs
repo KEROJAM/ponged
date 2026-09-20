@@ -11,7 +11,7 @@ use libp2p::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::protocol::{
-    GATEWAY_AGENT_VERSION, GATEWAY_PROTOCOL, GatewayRequest, GatewayResponse,
+    GATEWAY_AGENT_VERSION, GATEWAY_PROTOCOL, GatewayRequest, GatewayResponse, RatingProof,
     Request as GameRequest, Response as GameResponse,
 };
 use crate::sim::{SimCommand, remote_paddle_sink};
@@ -157,6 +157,9 @@ pub struct GatewayState {
     pub rank: Option<String>,
     /// Our current ELO rating.
     pub rating: i32,
+    /// The newest gateway-signed certificate for our rating (kept locally so
+    /// a gateway outage can never reset us). `None` until a gateway signs.
+    pub proof: Option<RatingProof>,
     /// Every peer identified so far as a matchmaking gateway (a deployment may
     /// run several). We queue on the first one; the rest must never be picked
     /// as an opponent.
@@ -232,11 +235,45 @@ pub fn poll_net_events(channels: Res<NetChannels>, mut commands: Commands) {
     }
 }
 
+/// Path of the persistent client keypair, next to the history database.
+fn client_key_path() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .map(|p| p.join("ponged").join("client.key"))
+        .unwrap_or_else(|| std::path::PathBuf::from("client.key"))
+}
+
+/// Loads (or creates on first run) the client's ed25519 keypair so the
+/// PeerId — and the gateway-signed rating proofs bound to it — survive
+/// restarts. Falls back to a fresh in-memory key if the file is unreadable or
+/// unwritable, in which case the identity (and any rating) is ephemeral.
+fn load_or_create_client_key() -> libp2p::identity::Keypair {
+    let path = client_key_path();
+    if let Ok(bytes) = std::fs::read(&path) {
+        let mut bytes = bytes;
+        if let Ok(keypair) = libp2p::identity::Keypair::ed25519_from_bytes(bytes.as_mut_slice()) {
+            return keypair;
+        }
+        warn!("{path:?} is not a valid ed25519 key; generating a new one");
+    }
+    let keypair = libp2p::identity::Keypair::generate_ed25519();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap_or_default();
+    }
+    if let Ok(ed25519) = keypair.clone().try_into_ed25519() {
+        if std::fs::write(&path, ed25519.secret().as_ref()).is_err() {
+            warn!(
+                "Could not persist client key to {path:?}; identity is ephemeral this run"
+            );
+        }
+    }
+    keypair
+}
+
 async fn run_swarm(
     mut command_rx: UnboundedReceiver<NetCommand>,
     event_tx: UnboundedSender<NetEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut swarm = SwarmBuilder::with_new_identity()
+    let mut swarm = SwarmBuilder::with_existing_identity(load_or_create_client_key())
         .with_tokio()
         .with_tcp(
             tcp::Config::default(),
