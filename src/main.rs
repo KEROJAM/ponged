@@ -741,7 +741,7 @@ mod networking_demo {
                 Request::InviteToPlay | Request::MatchStart => {
                     // Handled by `menu::on_game_request`.
                 }
-                Request::AcceptMatch | Request::DeclineMatch => {
+                Request::AcceptMatch | Request::DeclineMatch | Request::MatchAbort => {
                     // Pre-match confirmation handshake, handled by `menu::on_game_request`.
                 }
                 Request::MigrateHost(_) | Request::HostMigrated => {
