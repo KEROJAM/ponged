@@ -157,6 +157,10 @@ pub struct GatewayState {
     pub rank: Option<String>,
     /// Our current ELO rating.
     pub rating: i32,
+    /// Every peer identified so far as a matchmaking gateway (a deployment may
+    /// run several). We queue on the first one; the rest must never be picked
+    /// as an opponent.
+    pub known: std::collections::BTreeSet<PeerId>,
 }
 
 impl GatewayState {
@@ -174,12 +178,6 @@ impl GatewayState {
         Some(protocols.into_iter().collect())
     }
 }
-
-/// Every peer identified as a matchmaking gateway this session. Gateways must
-/// never be offered a match or picked as an opponent; a deployment can run
-/// several instances, so this is the full set, not just the active one.
-#[derive(Resource, Default)]
-pub struct KnownGateways(pub std::collections::BTreeSet<PeerId>);
 
 /// A short, readable slice of a peer id for display (`12D3Koo...abcd`).
 pub fn short_peer(peer: PeerId) -> String {

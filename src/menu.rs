@@ -12,7 +12,7 @@ use libp2p::{Multiaddr, PeerId};
 use super::AppState;
 use crate::config::Config;
 use crate::history::MatchHistory;
-use crate::networking::{GatewayState, KnownGateways, NetChannels, NetCommand, NetEvent, short_peer};
+use crate::networking::{GatewayState, NetChannels, NetCommand, NetEvent, short_peer};
 use crate::networking_demo::{IsHost, Peers, RemoteWorld};
 use crate::sim::{self, MatchSim};
 use ponged::protocol::{
@@ -1351,7 +1351,6 @@ pub fn on_local_peer_id(ev: On<NetEvent>, mut local: ResMut<LocalPeerId>) {
 pub fn on_identity(
     ev: On<NetEvent>,
     mut gateway: ResMut<GatewayState>,
-    mut known: ResMut<KnownGateways>,
     channels: Res<NetChannels>,
 ) {
     let NetEvent::Identity { peer, agent } = ev.event() else {
@@ -1362,7 +1361,7 @@ pub fn on_identity(
     }
     // Every gateway we meet is recorded so the menu never mistakes one for a
     // player. Only the first becomes the active gateway we queue on.
-    known.0.insert(*peer);
+    gateway.known.insert(*peer);
     if gateway.peer.is_some() {
         return;
     }
@@ -1465,7 +1464,7 @@ pub fn on_gateway_request(
     mut matched: ResMut<GatewayMatch>,
     mut intent: ResMut<MatchIntent>,
     mut pre: ResMut<PreMatch>,
-    known: Res<KnownGateways>,
+    gateway: Res<GatewayState>,
     channels: Res<NetChannels>,
 ) {
     let NetEvent::GatewayRequest { peer, request } = ev.event() else {
@@ -1480,7 +1479,7 @@ pub fn on_gateway_request(
                 warn!("Gateway sent unparseable opponent id: {opponent}");
                 return;
             };
-            if known.0.contains(&opponent_peer) {
+            if gateway.known.contains(&opponent_peer) {
                 warn!("Gateway {peer} proposed a match with another gateway ({opponent_peer}); ignoring");
                 return;
             }
@@ -2152,7 +2151,6 @@ pub fn update_buttons(
     peers: Res<Peers>,
     username: Res<Username>,
     channels: Res<NetChannels>,
-    known: Res<KnownGateways>,
     mut options_open: ResMut<OptionsOpen>,
     mut pre: ResMut<PreMatch>,
     gw_addrs: Res<GatewayAddresses>,
@@ -2188,7 +2186,7 @@ pub fn update_buttons(
                 } else {
                     search.0 = true;
                     pre.rejected.clear();
-                    start_search(&mut gateway, &known, &channels, &username, &peers, &mut pre, &gw_addrs);
+                    start_search(&mut gateway, &channels, &username, &peers, &mut pre, &gw_addrs);
                     info!("Searching for opponents (LAN + WAN)");
                 }
             }
@@ -2205,7 +2203,6 @@ pub fn update_buttons(
 
 fn start_search(
     gateway: &mut GatewayState,
-    known: &KnownGateways,
     channels: &NetChannels,
     username: &Username,
     peers: &Peers,
@@ -2232,6 +2229,9 @@ fn start_search(
                 peer: None,
                 rank: None,
                 rating: 0,
+                // Gateways identified earlier in the session stay flagged as
+                // such even while we re-dial the active one.
+                known: gateway.known.clone(),
             };
             if let Some(target) = gateway.addr.clone() {
                 let _ = channels.commands.send(NetCommand::Dial(target));
@@ -2255,7 +2255,7 @@ fn start_search(
         _ => {}
     }
 
-    invite_next_peer(pre, gateway, known, peers, channels);
+    invite_next_peer(pre, gateway, peers, channels);
 }
 
 /// Offers a match to the first known non-gateway, non-rejected peer. Callers
@@ -2263,7 +2263,6 @@ fn start_search(
 fn invite_next_peer(
     pre: &mut PreMatch,
     gateway: &GatewayState,
-    known: &KnownGateways,
     peers: &Peers,
     channels: &NetChannels,
 ) {
@@ -2271,7 +2270,7 @@ fn invite_next_peer(
         return;
     }
     for peer in &peers.0 {
-        if known.0.contains(peer)
+        if gateway.known.contains(peer)
             || gateway.peer == Some(*peer)
             || pre.rejected.contains(peer)
         {
@@ -2310,7 +2309,6 @@ fn resume_search(
     pre: &mut PreMatch,
     search: &AutoSearch,
     gateway: &GatewayState,
-    known: &KnownGateways,
     peers: &Peers,
     channels: &NetChannels,
 ) {
@@ -2330,7 +2328,7 @@ fn resume_search(
             request: GatewayRequest::QueueMatch,
         });
     }
-    invite_next_peer(pre, gateway, known, peers, channels);
+    invite_next_peer(pre, gateway, peers, channels);
 }
 
 /// The other player's display name when we know it, its short peer id otherwise.
@@ -2352,7 +2350,6 @@ pub fn update_prematch(
     mut pre: ResMut<PreMatch>,
     search: Res<AutoSearch>,
     gateway: Res<GatewayState>,
-    known: Res<KnownGateways>,
     peers: Res<Peers>,
     mut pending: ResMut<PendingMatch>,
     local: Res<LocalPeerId>,
@@ -2381,7 +2378,6 @@ pub fn update_prematch(
             &mut pre,
             &search,
             &gateway,
-            &known,
             &peers,
             &channels,
         );

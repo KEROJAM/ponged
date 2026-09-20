@@ -467,7 +467,6 @@ fn main() {
         .init_resource::<networking_demo::IsHost>()
         .init_resource::<networking_demo::SnapshotSeq>()
         .init_resource::<networking::GatewayState>()
-        .init_resource::<networking::KnownGateways>()
         .init_resource::<menu::ServerPingTimer>()
         .init_resource::<config::Config>()
         .init_resource::<menu::Username>()
