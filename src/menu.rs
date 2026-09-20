@@ -1498,6 +1498,7 @@ pub fn on_gateway_request(
     ev: On<NetEvent>,
     mut matched: ResMut<GatewayMatch>,
     mut intent: ResMut<MatchIntent>,
+    mut opponent: ResMut<Opponent>,
     mut pre: ResMut<PreMatch>,
     gateway: Res<GatewayState>,
     channels: Res<NetChannels>,
@@ -1529,6 +1530,7 @@ pub fn on_gateway_request(
                 pre.cancel();
             }
             pre.begin(opponent_peer);
+            opponent.0 = Some(opponent_peer);
             matched.0 = Some(opponent_peer);
             *intent = MatchIntent::Hosting;
             for addr in addresses {
