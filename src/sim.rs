@@ -69,33 +69,24 @@ pub enum SimCommand {
 #[derive(Debug, Clone)]
 pub struct SimOutput {
     pub ball: Vec2,
-    pub ball_velocity: Vec2,
     pub player_paddle: Vec2,
     pub opponent_paddle: Vec2,
     pub score_player: u32,
     pub score_opponent: u32,
-    /// Monotonic snapshot counter, kept so a migrated host can continue
-    /// numbering snapshots from where the previous host stopped.
-    pub seq: u64,
     /// True once either player reached `WIN_SCORE`. The ball stops moving
     /// but snapshots keep flowing so the guest can render the final state.
     pub match_over: bool,
-    /// Current rally speed multiplier (1.0 = base speed, grows per paddle hit).
-    pub ball_speed_mult: f32,
 }
 
 impl SimOutput {
     fn new() -> Self {
         SimOutput {
             ball: Vec2::ZERO,
-            ball_velocity: Vec2::new(-BALL_SPEED, BALL_SPEED),
             player_paddle: Vec2::new(-FIELD_SIZE.x / 2.0 + EDGE, 0.0),
             opponent_paddle: Vec2::new(FIELD_SIZE.x / 2.0 - EDGE, 0.0),
             score_player: 0,
             score_opponent: 0,
-            seq: 0,
             match_over: false,
-            ball_speed_mult: 1.0,
         }
     }
 }
@@ -437,34 +428,12 @@ fn publish(state: &SimState, output: &Arc<Mutex<SimOutput>>) {
     let mut output = output.lock().expect("sim output poisoned");
     *output = SimOutput {
         ball: state.ball,
-        ball_velocity: state.ball_velocity,
         player_paddle: state.player_paddle,
         opponent_paddle: state.opponent_paddle,
         score_player: state.score_player,
         score_opponent: state.score_opponent,
-        seq: state.seq,
         match_over: state.match_over,
-        ball_speed_mult: state.ball_speed_mult,
     };
-}
-
-/// Builds a `GameSnapshot` from the live simulation output (M7/host leaving).
-/// Lets a leaving host hand its authoritative state to the guest before it
-/// disconnects.
-pub fn build_host_snapshot(sim: &MatchSim) -> GameSnapshot {
-    let output = sim.output.lock().expect("sim output poisoned");
-    GameSnapshot {
-        seq: output.seq,
-        is_host: true,
-        ball: to_point(output.ball),
-        ball_velocity: to_point(output.ball_velocity),
-        player_paddle: to_point(output.player_paddle),
-        opponent_paddle: to_point(output.opponent_paddle),
-        player_score: output.score_player,
-        opponent_score: output.score_opponent,
-        match_over: output.match_over,
-        ball_speed_mult: output.ball_speed_mult,
-    }
 }
 
 fn run_sim(
