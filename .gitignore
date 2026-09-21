@@ -25,3 +25,6 @@ result-*
 *.sqlite
 orden.txt
 
+# SonarQube scanner (cache de analisis local)
+.scannerwork/
+

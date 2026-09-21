@@ -1,0 +1,68 @@
+name: SonarQube
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Si usas SonarQube Server propio, define la variable del repo
+  # SONAR_HOST_URL (Settings -> Secrets and variables -> Actions -> Variables)
+  # apuntando a tu instancia. Si no existe, se asume SonarQube Cloud.
+  SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+
+jobs:
+  sonarqube:
+    name: Analisis de calidad y seguridad
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Obtener codigo (full history para analisis por PR)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Instalar Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      # El shell `.#coverage` trae cargo-llvm-cov + llvm-tools (el devShell
+      # normal NO los incluye: son pesados). Tambien incluye las bibliotecas
+      # de sistema (wayland, x11, udev, ...) que Bevy/rusqlite necesitan.
+      - name: Tests con cobertura y reporte Clippy
+        run: |
+          nix develop .#coverage -c bash -c '
+            set -e
+            cargo llvm-cov --lcov --output-path target/lcov.info
+            cargo llvm-cov report --summary-only
+            cargo clippy --message-format=json > target/clippy.json || true
+          '
+
+      - name: Subir reportes (LCOV + Clippy)
+        uses: actions/upload-artifact@v4
+        with:
+          name: reportes-sonarqube
+          path: |
+            target/lcov.info
+            target/clippy.json
+          if-no-files-found: error
+
+      # El scanner solo consume los reportes (no recompila: en
+      # sonar-project.properties se desactiva la ejecucion automatica de clippy).
+      - name: Escanear con SonarQube
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      # Puerta de calidad: falla el job si el proyecto no pasa el Quality Gate.
+      - name: Quality Gate
+        uses: SonarSource/sonarqube-quality-gate-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          scanMetadataReportFile: .scannerwork/report-task.txt
+        timeout-minutes: 10

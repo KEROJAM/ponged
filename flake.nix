@@ -30,7 +30,8 @@
 
   in {
     # ── Development shell ───────────────────────────────────────────
-devShells."x86_64-linux".default = pkgs.mkShell {
+    # Shell ligero de desarrollo: NO incluye LLVM (pesado) ni cargo-llvm-cov.
+    devShells."x86_64-linux".default = pkgs.mkShell {
       buildInputs = clientLibs ++ (with pkgs; [
         cargo rustc rustfmt clippy rust-analyzer
       ]);
@@ -42,6 +43,30 @@ devShells."x86_64-linux".default = pkgs.mkShell {
       nativeBuildInputs = [pkgs.pkg-config pkgs.perl];
 
       env.RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
+    };
+
+    # ── Coverage shell (solo para el pipeline de SonarQube) ─────────
+    # Igual que el default + cargo-llvm-cov y los llvm-tools que emparejan con
+    # la rustc del flake. Se entra con `nix develop .#coverage`: no engorda el
+    # devShell de uso diario. Uso:
+    #   nix develop .#coverage -c cargo llvm-cov --lcov --output-path target/lcov.info
+    devShells."x86_64-linux".coverage = pkgs.mkShell {
+      buildInputs = clientLibs ++ (with pkgs; [
+        cargo rustc rustfmt clippy rust-analyzer cargo-llvm-cov
+        # llvm-tools del mismo toolchain que la rustc del flake. Es buildInput
+        # (no solo env) para que `nix develop .#coverage` lo descargue.
+        pkgs.rustc.llvmPackages.llvm
+      ]);
+
+      LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [ wayland libxkbcommon vulkan-loader libx11 libxcursor libxrandr libxi libxcb ]);
+      shellHook = ''
+	      export LD_LIBRARY_PATH=${pkgs.wayland}/lib:$LD_LIBRARY_PATH
+	  '';
+      nativeBuildInputs = [pkgs.pkg-config pkgs.perl];
+
+      env.RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
+      env.LLVM_COV = "${pkgs.rustc.llvmPackages.llvm}/bin/llvm-cov";
+      env.LLVM_PROFDATA = "${pkgs.rustc.llvmPackages.llvm}/bin/llvm-profdata";
     };
 
     # ── Gateway binary (headless, musl estatico) ────────────────────
