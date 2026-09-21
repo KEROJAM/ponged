@@ -12,14 +12,14 @@ use std::sync::Mutex;
 
 use bevy::prelude::*;
 use dirs::data_local_dir;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// Encryption key for the SQLite database. Stored here to keep the
 /// database encrypted at rest; this is the only place it is stored.
 const DB_ENCRYPTION_KEY: &str = "ponged-v1-encrypted-history";
 
 use crate::Score;
-use crate::menu::Opponent;
+use crate::menu::{ActiveMatch, Opponent};
 use crate::networking::{GatewayState, NetChannels, NetCommand, short_peer};
 use crate::networking_demo::{IsHost, RemoteWorld};
 use ponged::protocol::{GatewayRequest, RatingProof, DEFAULT_RATING};
@@ -41,6 +41,13 @@ pub struct MatchRecord {
     pub opp_score: i32,
     #[allow(dead_code)]
     pub was_host: bool,
+    /// Gateway-assigned id of this match (0 for LAN/local matches). Used to
+    /// apply a moderation revocation to the right record.
+    #[allow(dead_code)]
+    pub gateway_match_id: i64,
+    /// True once a moderator revoked this match: it no longer counts toward
+    /// the win/loss record (and the ELO it earned was rolled back).
+    pub revoked: bool,
 }
 
 /// Connection + cached ranking. Wrapped in a `Mutex` because `rusqlite`'s
@@ -102,6 +109,35 @@ impl MatchHistory {
             )
             .is_ok()
         {
+            // Migrate databases created before the revocation fields existed.
+            let has_match_id = conn
+                .prepare("SELECT 1 FROM pragma_table_info('matches') WHERE name = 'gateway_match_id'")
+                .and_then(|mut stmt| stmt.query_row([], |_| Ok(())))
+                .optional()
+                .ok()
+                .flatten()
+                .is_some();
+            if !has_match_id {
+                conn.execute(
+                    "ALTER TABLE matches ADD COLUMN gateway_match_id INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )
+                .ok();
+            }
+            let has_revoked = conn
+                .prepare("SELECT 1 FROM pragma_table_info('matches') WHERE name = 'revoked'")
+                .and_then(|mut stmt| stmt.query_row([], |_| Ok(())))
+                .optional()
+                .ok()
+                .flatten()
+                .is_some();
+            if !has_revoked {
+                conn.execute(
+                    "ALTER TABLE matches ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )
+                .ok();
+            }
             self.db = Some(Mutex::new(conn));
             self.reload();
         }
@@ -112,7 +148,7 @@ impl MatchHistory {
         let Some(db) = &self.db else { return };
         let Ok(conn) = db.lock() else { return };
         let mut stmt = match conn.prepare(
-            "SELECT id, happened_at, rival, my_score, opp_score, was_host
+            "SELECT id, happened_at, rival, my_score, opp_score, was_host, gateway_match_id, revoked
              FROM matches ORDER BY id DESC LIMIT ?1",
         ) {
             Ok(s) => s,
@@ -123,6 +159,7 @@ impl MatchHistory {
         };
         let rows = stmt.query_map(params![HISTORY_LIMIT as i64], |row| {
             let was_host: i64 = row.get(5)?;
+            let revoked: i64 = row.get(7)?;
             Ok(MatchRecord {
                 id: row.get(0)?,
                 happened_at: row.get(1)?,
@@ -130,6 +167,8 @@ impl MatchHistory {
                 my_score: row.get(3)?,
                 opp_score: row.get(4)?,
                 was_host: was_host != 0,
+                gateway_match_id: row.get(6)?,
+                revoked: revoked != 0,
             })
         });
         self.records = match rows {
@@ -141,17 +180,63 @@ impl MatchHistory {
         };
     }
 
-    /// Wins, losses (and draws) from the cached record.
+    /// Wins, losses (and draws) from the cached record. Revoked matches (a
+    /// moderator decided they weren't played fairly) never count.
     pub fn wins_losses(&self) -> (u32, u32, u32) {
-        self.records.iter().fold((0, 0, 0), |(w, l, d), rec| {
-            if rec.my_score > rec.opp_score {
-                (w + 1, l, d)
-            } else if rec.my_score < rec.opp_score {
-                (w, l + 1, d)
-            } else {
-                (w, l, d + 1)
-            }
-        })
+        self.records
+            .iter()
+            .filter(|rec| !rec.revoked)
+            .fold((0, 0, 0), |(w, l, d), rec| {
+                if rec.my_score > rec.opp_score {
+                    (w + 1, l, d)
+                } else if rec.my_score < rec.opp_score {
+                    (w, l + 1, d)
+                } else {
+                    (w, l, d + 1)
+                }
+            })
+    }
+
+    /// Number of revoked matches shown in the record panel.
+    pub fn revoked_count(&self) -> u32 {
+        self.records.iter().filter(|r| r.revoked).count() as u32
+    }
+
+    /// Marks every local record of gateway match `gateway_match_id` as revoked
+    /// (called when the moderator pushes `MatchRevoked`).
+    pub fn mark_match_revoked(&mut self, gateway_match_id: u64) {
+        let changed = {
+            let Some(db) = &self.db else { return };
+            let Ok(conn) = db.lock() else { return };
+            conn.execute(
+                "UPDATE matches SET revoked = 1 WHERE gateway_match_id = ?1",
+                params![gateway_match_id as i64],
+            )
+            .unwrap_or(0)
+        };
+        if changed > 0 {
+            self.rev += 1;
+            self.reload();
+        }
+    }
+
+    /// Overwrites the final score of every local record of gateway match
+    /// `gateway_match_id` (called when the moderator/cached rating corrected
+    /// it), so the win/loss tally reflects the honest result.
+    pub fn correct_score(&mut self, gateway_match_id: u64, my_score: u32, opp_score: u32) {
+        let changed = {
+            let Some(db) = &self.db else { return };
+            let Ok(conn) = db.lock() else { return };
+            conn.execute(
+                "UPDATE matches SET my_score = ?2, opp_score = ?3 WHERE gateway_match_id = ?1",
+                params![gateway_match_id as i64, my_score, opp_score],
+            )
+            .unwrap_or(0)
+        };
+        if changed > 0 {
+            self.rev += 1;
+            self.reload();
+        }
     }
 
     /// Reads the stored display name, if any.
@@ -245,6 +330,7 @@ pub fn record_match(
     world: Res<RemoteWorld>,
     opponent: Res<Opponent>,
     gateway: Res<GatewayState>,
+    active: Res<ActiveMatch>,
     match_over: Res<crate::sim::MatchOver>,
     channels: Res<NetChannels>,
 ) {
@@ -276,9 +362,9 @@ pub fn record_match(
     let result = {
         let Ok(conn) = db.lock() else { return };
         conn.execute(
-            "INSERT INTO matches (happened_at, rival, my_score, opp_score, was_host)
-             VALUES (datetime('now'), ?1, ?2, ?3, ?4)",
-            params![short_peer(rival), my_score, opp_score, was_host],
+            "INSERT INTO matches (happened_at, rival, my_score, opp_score, was_host, gateway_match_id)
+             VALUES (datetime('now'), ?1, ?2, ?3, ?4, ?5)",
+            params![short_peer(rival), my_score, opp_score, was_host, active.0 as i64],
         )
     };
     if result.is_ok() {
@@ -286,17 +372,20 @@ pub fn record_match(
         history.reload();
     }
 
-    // Report the result to the gateway for ELO rating updates (M6).
+    // Report the result to the gateway for ELO rating updates (M6). The
+    // gateway-assigned `match_id` lets the gateway merge the two reports and,
+    // if a moderator revokes the match, lets the client drop it too.
     if let Some(gw_peer) = gateway.peer {
         let _ = channels.commands.send(NetCommand::SendGatewayRequest {
             peer: gw_peer,
             request: GatewayRequest::ReportResult {
+                match_id: active.0,
                 opponent: rival.to_base58(),
                 my_score: my_score as u32,
                 opponent_score: opp_score as u32,
             },
         });
-        info!("Reported match result to gateway: {my_score}-{opp_score} vs {rival}");
+        info!("Reported match result (#{}) to gateway: {my_score}-{opp_score} vs {rival}", active.0);
     }
 }
 

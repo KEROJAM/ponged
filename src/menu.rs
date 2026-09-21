@@ -231,6 +231,12 @@ pub struct LocalPeerId(pub Option<PeerId>);
 #[derive(Resource, Default)]
 pub struct GatewayMatch(pub Option<PeerId>);
 
+/// The gateway-assigned id of the match currently being played (`0` for
+/// LAN/local matches). Correlates the `ReportResult` the gateway stores and
+/// lets a later `MatchRevoked` revocation reach the right local record.
+#[derive(Resource, Default)]
+pub struct ActiveMatch(pub u64);
+
 /// Seconds the other player has to answer the pair request.
 const PREMATCH_ACCEPT_SECS: f32 = 20.0;
 /// Countdown shown once both players accept before the match starts.
@@ -1537,9 +1543,10 @@ pub fn on_gateway_response(
     }
 }
 
-/// Consumes gateway *requests* — currently the `MatchFound` push announcing a
-/// reserved match (M6 → M5). The pairing opens the confirmation dialog instead
-/// of auto-challenging.
+/// Consumes gateway *requests* — the `MatchFound` push announcing a reserved
+/// match (M6 → M5), the `MatchRevoked` moderation push, and the `MatchCorrected`
+/// score-correction push. A pairing opens the confirmation dialog instead of
+/// auto-challenging.
 pub fn on_gateway_request(
     ev: On<NetEvent>,
     state: Res<State<AppState>>,
@@ -1547,7 +1554,9 @@ pub fn on_gateway_request(
     mut intent: ResMut<MatchIntent>,
     mut opponent: ResMut<Opponent>,
     mut pre: ResMut<PreMatch>,
-    gateway: Res<GatewayState>,
+    mut gateway: ResMut<GatewayState>,
+    mut active: ResMut<ActiveMatch>,
+    mut history: ResMut<MatchHistory>,
     channels: Res<NetChannels>,
 ) {
     let NetEvent::GatewayRequest { peer, request } = ev.event() else {
@@ -1555,6 +1564,7 @@ pub fn on_gateway_request(
     };
     match request {
         GatewayRequest::MatchFound {
+            match_id,
             opponent: opponent_str,
             addresses,
         } => {
@@ -1583,11 +1593,54 @@ pub fn on_gateway_request(
             opponent.0 = Some(opponent_peer);
             matched.0 = Some(opponent_peer);
             *intent = MatchIntent::Hosting;
+            // Remember the gateway-assigned id so the eventual result report
+            // can be correlated (and revoked) server-side.
+            active.0 = *match_id;
             for addr in addresses {
                 if let Ok(multiaddr) = addr.parse::<Multiaddr>() {
                     let _ = channels.commands.send(NetCommand::Dial(multiaddr));
                 }
             }
+        }
+        GatewayRequest::MatchRevoked {
+            match_id,
+            rating,
+            proof,
+        } => {
+            info!("Match #{match_id} revoked by a moderator; rating restored to {rating}");
+            gateway.rating = *rating;
+            gateway.rank = Some(rank_for_rating(*rating).to_string());
+            if let Some(p) = proof {
+                gateway.proof = Some(p.clone());
+                history.save_rating_proof(p);
+            }
+            history.save_rating(*rating);
+            if active.0 == *match_id {
+                active.0 = 0;
+            }
+            history.mark_match_revoked(*match_id);
+        }
+        GatewayRequest::MatchCorrected {
+            match_id,
+            my_score,
+            opponent_score,
+            rating,
+            proof,
+        } => {
+            // A moderator fixed the final score of this match (each number is
+            // this player's own score from their point of view). Recompute the
+            // ELO move and keep the local history honest.
+            info!(
+                "Match #{match_id} score corrected by a moderator: {my_score}-{opponent_score}; rating {rating}"
+            );
+            gateway.rating = *rating;
+            gateway.rank = Some(rank_for_rating(*rating).to_string());
+            if let Some(p) = proof {
+                gateway.proof = Some(p.clone());
+                history.save_rating_proof(p);
+            }
+            history.save_rating(*rating);
+            history.correct_score(*match_id, *my_score, *opponent_score);
         }
         _ => {
             debug!("Gateway request from {peer}: {request:?}");
@@ -1778,11 +1831,15 @@ pub fn on_exit_playing(
     mut pre: ResMut<PreMatch>,
     mut opponent: ResMut<Opponent>,
     mut matched: ResMut<GatewayMatch>,
+    mut active: ResMut<ActiveMatch>,
     mut intent: ResMut<MatchIntent>,
     pending: Res<PendingMatch>,
 ) {
     search.0 = false;
     matched.0 = None;
+    // The match that just ended has been recorded (`record_match` runs before
+    // this system); a fresh pairing will set it again.
+    active.0 = 0;
     *intent = MatchIntent::Idle;
     // A queued replacement match (Playing → Menu → Playing) is on its way:
     // keep the new opponent and the pending marker.
@@ -2238,9 +2295,16 @@ pub fn update_menu(
         &mut labels,
         TextLine::Record,
         if wins + losses + draws == 0 {
-            String::new()
+            match history.revoked_count() {
+                0 => String::new(),
+                n => format!("{n} partida{} revocada{}", if n == 1 { "" } else { "s" }, if n == 1 { "" } else { "s" }),
+            }
         } else {
-            format!("Récord: {wins}V / {losses}D / {draws}E")
+            let base = format!("Récord: {wins}V / {losses}D / {draws}E");
+            match history.revoked_count() {
+                0 => base,
+                n => format!("{base} · {n} revocada{}", if n == 1 { "" } else { "s" }),
+            }
         },
     );
 }

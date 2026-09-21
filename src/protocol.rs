@@ -167,19 +167,49 @@ pub enum GatewayRequest {
     /// Leave the matchmaking queue.
     LeaveQueue,
     /// Report a finished match so the gateway updates both ratings (ELO).
+    /// `match_id` is the gateway-assigned id received in [`GatewayRequest::MatchFound`]
+    /// (0 for matches that started outside the gateway's queue, e.g. LAN).
     ReportResult {
+        #[serde(default)]
+        match_id: u64,
         opponent: String,
         my_score: u32,
         opponent_score: u32,
     },
     /// Cheap keepalive / status query.
     Ping,
-    /// **Gateway → client.** A match was reserved: `opponent` is the matched
-    /// player's base58 `PeerId`; `addresses` are dialable relay/direct
-    /// multiaddrs to reach them. Delivered to both sides (via M3).
+    /// **Gateway → client.** A match was reserved: `match_id` uniquely
+    /// identifies this pairing for later result reports and moderation;
+    /// `opponent` is the matched player's base58 `PeerId`; `addresses` are
+    /// dialable relay/direct multiaddrs to reach them. Delivered to both sides.
     MatchFound {
+        #[serde(default)]
+        match_id: u64,
         opponent: String,
         addresses: Vec<Addr>,
+    },
+    /// **Gateway → client.** A moderator revoked match `match_id` for not being
+    /// played fairly. The gateway rolled back the ELO both players gained from
+    /// it and certifies the restored `rating` with a fresh `proof`; clients
+    /// must adopt it (and drop the revoked match from their local record).
+    MatchRevoked {
+        match_id: u64,
+        rating: i32,
+        #[serde(default = "default_no_proof")]
+        proof: Option<RatingProof>,
+    },
+    /// **Gateway → client.** A moderator corrected the final score of match
+    /// `match_id` (each number is that player's own score from their point of
+    /// view). ELO was recomputed from the corrected outcome; `rating` is the
+    /// certifying proof's value. Clients must adopt it and update their local
+    /// record so the win/loss tally stays honest.
+    MatchCorrected {
+        match_id: u64,
+        my_score: u32,
+        opponent_score: u32,
+        rating: i32,
+        #[serde(default = "default_no_proof")]
+        proof: Option<RatingProof>,
     },
 }
 
@@ -398,12 +428,84 @@ mod tests {
     #[test]
     fn gateway_request_roundtrips() {
         let req = GatewayRequest::MatchFound {
+            match_id: 7,
             opponent: "12D3KooExample".into(),
             addresses: vec!["/ip4/1.2.3.4/tcp/4001/p2p/test".into()],
         };
         let bytes = cbor4ii::serde::to_vec(Vec::new(), &req).expect("serialize");
         let decoded: GatewayRequest = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn report_result_roundtrips() {
+        let req = GatewayRequest::ReportResult {
+            match_id: 42,
+            opponent: "12D3KooOpponent".into(),
+            my_score: 5,
+            opponent_score: 2,
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &req).expect("serialize");
+        let decoded: GatewayRequest = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn match_revoked_roundtrips() {
+        let req = GatewayRequest::MatchRevoked {
+            match_id: 42,
+            rating: 816,
+            proof: Some(RatingProof {
+                rating: 816,
+                seq: 5,
+                gateway: "12D3KooRevoker".into(),
+                signature: vec![9, 8, 7],
+            }),
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &req).expect("serialize");
+        let decoded: GatewayRequest = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn match_corrected_roundtrips() {
+        let req = GatewayRequest::MatchCorrected {
+            match_id: 7,
+            my_score: 5,
+            opponent_score: 4,
+            rating: 832,
+            proof: None,
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &req).expect("serialize");
+        let decoded: GatewayRequest = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn old_matchfound_without_match_id_defaults_to_zero() {
+        // An older gateway that predates `match_id` must deserialize with 0 so
+        // a new client never mistakes an unrelated match for a revocable one.
+        #[derive(Serialize)]
+        enum OldGatewayRequest {
+            MatchFound {
+                opponent: String,
+                addresses: Vec<String>,
+            },
+        }
+        let old = OldGatewayRequest::MatchFound {
+            opponent: "12D3KooOld".into(),
+            addresses: vec!["/p2p/old".into()],
+        };
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &old).expect("serialize");
+        let decoded: GatewayRequest = cbor4ii::serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(
+            decoded,
+            GatewayRequest::MatchFound {
+                match_id: 0,
+                opponent: "12D3KooOld".into(),
+                addresses: vec!["/p2p/old".into()],
+            }
+        );
     }
 
     #[test]

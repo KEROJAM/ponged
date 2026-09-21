@@ -5703,10 +5703,12 @@ dependencies = [
  "cbor4ii",
  "dirs",
  "libp2p",
+ "rand 0.9.5",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

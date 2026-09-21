@@ -476,6 +476,7 @@ fn main() {
         .init_resource::<menu::PendingMatch>()
         .init_resource::<menu::MatchIntent>()
         .init_resource::<menu::GatewayMatch>()
+        .init_resource::<menu::ActiveMatch>()
         .init_resource::<menu::PreMatch>()
         .init_resource::<menu::AutoSearch>()
         .init_resource::<menu::PeerNames>()
