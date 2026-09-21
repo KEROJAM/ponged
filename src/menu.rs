@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use bevy::asset::AssetId;
 use bevy::prelude::*;
 use bevy::text::{EditableText, Font, TextCursorStyle, TextEdit};
+use bevy::window::PrimaryWindow;
 use serde_json::{from_str, Value};
 use bevy::input_focus::{AutoFocus, FocusCause, InputFocus};
 use libp2p::core::multiaddr::Protocol;
@@ -2010,7 +2011,9 @@ pub fn update_chat(
             should_send = true;
         }
     }
-    if keyboard_input.just_pressed(KeyCode::Enter) {
+    if keyboard_input.just_pressed(KeyCode::Enter)
+        || keyboard_input.just_pressed(KeyCode::NumpadEnter)
+    {
         should_send = true;
     }
 
@@ -2097,6 +2100,20 @@ pub fn focus_text_input(
         if interaction.is_changed() && *interaction == Interaction::Pressed {
             focus.set(entity, FocusCause::Pressed);
         }
+    }
+}
+
+/// Keeps the OS input method (IME) off the whole game window.
+///
+/// Bevy auto-enables the IME whenever an `EditableText` has focus. With an
+/// active input method (e.g. Fcitx on Linux) that routes key events through
+/// itself, the physical Enter is consumed to commit composition, so
+/// `just_pressed(KeyCode::Enter)` never fires and chat messages can't be sent
+/// with Enter. The game's text fields (chat, username, options) only need
+/// plain Latin input, so the IME adds nothing here while breaking Enter.
+pub fn keep_ime_disabled(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+    for mut window in &mut windows {
+        window.ime_enabled = false;
     }
 }
 

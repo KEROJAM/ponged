@@ -1,6 +1,7 @@
 use bevy::camera::ScalingMode;
 use bevy::math::bounding::{Aabb2d, BoundingVolume, IntersectsVolume};
 use bevy::prelude::*;
+use bevy::ui_widgets::ImeSystems;
 use ponged::protocol;
 
 use crate::config::Config;
@@ -490,6 +491,10 @@ fn main() {
         .init_resource::<menu::ChatBuffer>()
         .init_resource::<menu::PingHistory>()
         .add_systems(Startup, (config::load_config, menu::load_settings, menu::install_default_font, spawn_camera, networking_demo::setup))
+        .add_systems(
+            PreUpdate,
+            menu::keep_ime_disabled.after(ImeSystems::ToggleWindowIMEInput),
+        )
         .add_systems(OnEnter(AppState::Menu), menu::spawn_menu)
         .add_systems(OnEnter(AppState::Menu), history::refresh_on_menu)
         .add_systems(OnExit(AppState::Menu), menu::despawn_menu)
