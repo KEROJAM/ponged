@@ -13,8 +13,8 @@ use super::AppState;
 use crate::config::Config;
 use crate::history::MatchHistory;
 use crate::networking::{GatewayState, NetChannels, NetCommand, NetEvent, short_peer};
-use crate::networking_demo::{IsHost, Peers, RemoteWorld};
-use crate::sim::{self, MatchSim};
+use crate::networking_demo::{IsHost, Peers};
+use crate::sim::{self};
 use ponged::protocol::{
     next_rank_name, rank_for_rating, rank_progress, GatewayRequest, GatewayResponse,
     Request as GameRequest,
@@ -253,6 +253,12 @@ pub struct PreMatch {
     pub opponent: Option<PeerId>,
     pub self_accepted: bool,
     pub opp_accepted: bool,
+    /// The opponent of the most recent finished match. Kept out of the
+    /// automatic-invitation loop so pressing "Jugar" right after a match
+    /// doesn't instantly drag the player we just faced into a new pairing —
+    /// and so an idle player on the menu is never auto-queued by a former
+    /// opponent's hunt. Rematches still work through the gateway queue.
+    pub previous: Option<PeerId>,
     /// Acceptance window remaining while we wait for the other player.
     pub waiting: Option<Timer>,
     /// Five-second countdown after both players accept.
@@ -1080,7 +1086,7 @@ pub fn spawn_menu(
             justify_content: JustifyContent::Center,
             ..default()
         },
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.95)),
         children![(
             Node {
                 flex_direction: FlexDirection::Column,
@@ -1423,6 +1429,7 @@ pub fn on_peer_identified(
         && pre.idle()
         && !gateway.known.contains(peer)
         && gateway.peer != Some(*peer)
+        && pre.previous != Some(*peer)
         && !pre.rejected.contains(peer)
     {
         info!("Offering a match to identified peer {peer}");
@@ -1702,6 +1709,7 @@ pub fn on_game_request(
         }
         GameRequest::MatchAbort => {
             info!("{peer} ended the match; back to menu");
+            pre.previous = Some(*peer);
             opponent.0 = None;
             pending.0 = None;
             if *state == AppState::Playing {
@@ -1755,6 +1763,33 @@ pub fn on_enter_playing(
             peer,
             request: GatewayRequest::LeaveQueue,
         });
+    }
+}
+
+/// Runs when leaving `Playing`: stops the hunt, clears the stale `MatchFound`
+/// marker and remembers who we just played so the next hunt doesn't instantly
+/// re-invite them (and an idle player is never auto-queued by a former
+/// opponent). When a fresh match is already lined up — a remote request
+/// arrived while we were mid-game — the swap state is left intact so
+/// [`enter_pending_match`] can finish it on the next frame.
+pub fn on_exit_playing(
+    mut search: ResMut<AutoSearch>,
+    mut pre: ResMut<PreMatch>,
+    mut opponent: ResMut<Opponent>,
+    mut matched: ResMut<GatewayMatch>,
+    mut intent: ResMut<MatchIntent>,
+    pending: Res<PendingMatch>,
+) {
+    search.0 = false;
+    matched.0 = None;
+    *intent = MatchIntent::Idle;
+    // A queued replacement match (Playing → Menu → Playing) is on its way:
+    // keep the new opponent and the pending marker.
+    if pending.0.is_some() {
+        return;
+    }
+    if let Some(peer) = opponent.0.take() {
+        pre.previous = Some(peer);
     }
 }
 
@@ -1836,6 +1871,7 @@ pub fn on_peer_disconnected(
     mut opponent: ResMut<Opponent>,
     mut pending: ResMut<PendingMatch>,
     mut reconn: ResMut<ReconnectionState>,
+    mut pre: ResMut<PreMatch>,
 ) {
     let NetEvent::PeerDisconnected(peer) = ev.event() else {
         return;
@@ -1857,6 +1893,7 @@ pub fn on_peer_disconnected(
     }
 
     info!("Opponent {peer} disconnected, back to menu");
+    pre.previous = Some(*peer);
     pending.0 = None;
     if *state == AppState::Playing {
         next.set(AppState::Menu);
@@ -2370,6 +2407,7 @@ fn invite_next_peer(
         if gateway.known.contains(peer)
             || gateway.peer == Some(*peer)
             || pre.rejected.contains(peer)
+            || pre.previous == Some(*peer)
         {
             continue;
         }

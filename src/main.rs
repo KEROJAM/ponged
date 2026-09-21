@@ -566,6 +566,7 @@ fn main() {
                 spawn_game_over_ui,
                 reset_score,
                 reset_match_over,
+                networking_demo::reset_match_state,
                 sim::start_match_sim.run_if(resource_equals(networking_demo::IsHost(true))),
                 history::arm_record,
                 menu::on_enter_playing,
@@ -577,6 +578,7 @@ fn main() {
                 cleanup_playing,
                 sim::stop_match_sim.run_if(resource_equals(networking_demo::IsHost(true))),
                 history::record_match,
+                menu::on_exit_playing,
             ),
         )
         // Only the guest pushes snapshots from Bevy; the host's authoritative
@@ -685,6 +687,23 @@ mod networking_demo {
             SNAPSHOT_INTERVAL,
             TimerMode::Repeating,
         )));
+    }
+
+    /// Fresh match, fresh network state: drop the previous match's cached
+    /// snapshots and re-seed the snapshot counter. The guest renders from
+    /// `RemoteWorld`/`LatestSnapshot`; carrying them across matches would keep
+    /// showing the last game's final scores (and its final winner). The first
+    /// snapshot of the new match is also safer to accept this way: a fresh
+    /// host simulation restarts its `seq` at 0, so a stale higher-seq frame
+    /// would otherwise never be displaced.
+    pub fn reset_match_state(
+        mut world: ResMut<RemoteWorld>,
+        mut latest: ResMut<LatestSnapshot>,
+        mut seq: ResMut<SnapshotSeq>,
+    ) {
+        *world = RemoteWorld::default();
+        *latest = LatestSnapshot::default();
+        seq.0 = 0;
     }
 
     #[allow(clippy::too_many_arguments)]
