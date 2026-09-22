@@ -512,6 +512,7 @@ fn main() {
         .init_resource::<menu::HistoryOpen>()
         .init_resource::<menu::NeedsOnboarding>()
         .init_resource::<menu::DiscoveryTimer>()
+        .init_resource::<menu::RegistrationTimer>()
         .init_resource::<menu::OrbitState>()
         .init_resource::<history::MatchHistory>()
         .init_resource::<sim::MatchOver>()

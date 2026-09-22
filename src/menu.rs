@@ -188,11 +188,15 @@ pub struct HistoryOpen(pub bool);
 #[derive(Resource, Default)]
 pub struct NeedsOnboarding(pub bool);
 
-/// How often we re-query the gateway's rendezvous server for players while
-/// searching (M3), so new hosts appear in the roster in real time.
+/// How often the rendezvous server is re-queried for new players.
 const DISCOVERY_INTERVAL_SECS: f32 = 5.0;
+/// How often the rendezvous registration is renewed. The server drops
+/// registrations after their TTL (300 s), so clients must re-register to stay
+/// discoverable; 120 s keeps a generous margin.
+const REGISTER_INTERVAL_SECS: f32 = 120.0;
 
-/// Periodic rendezvous discovery poll, active while "Jugar" is running.
+/// Periodic rendezvous discovery poll (re-queries for new players), active
+/// while the gateway relay is connected so seated players still see others.
 #[derive(Resource)]
 pub struct DiscoveryTimer(Timer);
 
@@ -200,6 +204,21 @@ impl Default for DiscoveryTimer {
     fn default() -> Self {
         DiscoveryTimer(Timer::from_seconds(
             DISCOVERY_INTERVAL_SECS,
+            TimerMode::Repeating,
+        ))
+    }
+}
+
+/// Periodic rendezvous re-registration so the client stays discoverable on the
+/// gateway's server (registrations expire after their TTL even if the client
+/// connection stays up).
+#[derive(Resource)]
+pub struct RegistrationTimer(Timer);
+
+impl Default for RegistrationTimer {
+    fn default() -> Self {
+        RegistrationTimer(Timer::from_seconds(
+            REGISTER_INTERVAL_SECS,
             TimerMode::Repeating,
         ))
     }
@@ -1825,35 +1844,48 @@ pub fn on_rendezvous_discovered(ev: On<NetEvent>, peers: Res<Peers>, channels: R
     }
 }
 
-/// Re-queries the gateway's rendezvous server while "Jugar" is running so that
-/// newly arrived players (WAN) show up in the roster without a restart. Fires
-/// immediately when the search becomes ready, then every few seconds.
+/// Re-queries the gateway's rendezvous server so newly arrived players (WAN)
+/// show up in the roster without a restart, and periodically re-registers so we
+/// keep appearing for others. Runs for as long as the gateway relay is
+/// connected (not only while "Jugar" is active), so players who are seated in
+/// the lobby remain reachable for chat; match invites stay gated by `search`.
 pub fn update_discovery(
     time: Res<Time>,
     mut timer: ResMut<DiscoveryTimer>,
-    search: Res<AutoSearch>,
+    mut register: ResMut<RegistrationTimer>,
     gateway: Res<GatewayState>,
     channels: Res<NetChannels>,
     mut was_ready: Local<bool>,
 ) {
     timer.0.tick(time.delta());
+    register.0.tick(time.delta());
 
     let peer = gateway.peer;
-    let ready = search.0 && gateway.connected && gateway.reserved && peer.is_some();
-    if !ready {
-        timer.0.reset();
-        *was_ready = false;
-        return;
-    }
+    let gateway_address = match peer {
+        Some(p) if gateway.connected && gateway.reserved => p,
+        _ => {
+            timer.0.reset();
+            register.0.reset();
+            *was_ready = false;
+            return;
+        }
+    };
+
     let fire = !*was_ready || timer.0.just_finished();
-    *was_ready = true;
     if fire {
-        let self_peer = peer.expect("ready implies gateway peer");
         let _ = channels.commands.send(NetCommand::RendezvousDiscover {
-            peer: self_peer,
+            peer: gateway_address,
             namespace: "/pong/all".to_string(),
         });
     }
+    if !*was_ready || register.0.just_finished() {
+        info!("Refreshing rendezvous registration (TTL {REGISTER_INTERVAL_SECS:.0}s)");
+        let _ = channels.commands.send(NetCommand::RendezvousRegister {
+            peer: gateway_address,
+            namespace: "/pong/all".to_string(),
+        });
+    }
+    *was_ready = true;
 }
 
 /// Handles inbound matchmaking messages. Match requests are accepted in any
