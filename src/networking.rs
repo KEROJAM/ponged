@@ -213,8 +213,15 @@ fn setup(mut commands: Commands) {
 
     // The swarm is async and must be driven continuously, so it lives on a
     // tokio runtime on its own thread, communicating with Bevy via channels.
+    // A single-threaded runtime is all the client needs: one swarm future is
+    // polled in a loop and everything it spawns (yamux subscribers, timers)
+    // is I/O-bound. A full multi-thread runtime would spin up one worker per
+    // CPU core just to idle, wasting RAM and context switches.
     std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Runtime::new() {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(runtime) => runtime,
             Err(e) => {
                 let _ = event_tx.send(NetEvent::Error(e.to_string()));

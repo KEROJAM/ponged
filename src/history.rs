@@ -19,13 +19,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 const DB_ENCRYPTION_KEY: &str = "ponged-v1-encrypted-history";
 
 use crate::Score;
-use crate::menu::{ActiveMatch, Opponent};
+use crate::menu::{ActiveMatch, Opponent, PeerNames};
 use crate::networking::{GatewayState, NetChannels, NetCommand, short_peer};
 use crate::networking_demo::{IsHost, RemoteWorld};
 use ponged::protocol::{GatewayRequest, RatingProof, DEFAULT_RATING};
 
 /// How many past matches the ranking panel shows.
-const HISTORY_LIMIT: usize = 10;
+pub const HISTORY_LIMIT: usize = 10;
 
 /// One stored match.
 #[derive(Debug, Clone)]
@@ -323,12 +323,14 @@ pub fn arm_record(mut history: ResMut<MatchHistory>) {
 /// the win threshold are recorded/reported: an abandoned match (opponent
 /// disconnected, ESC before `WIN_SCORE`, `MatchAbort`) has no verifiable
 /// outcome and must not move anyone's rating.
+#[allow(clippy::too_many_arguments)]
 pub fn record_match(
     mut history: ResMut<MatchHistory>,
     host: Res<IsHost>,
     score: Res<Score>,
     world: Res<RemoteWorld>,
     opponent: Res<Opponent>,
+    names: Res<PeerNames>,
     gateway: Res<GatewayState>,
     active: Res<ActiveMatch>,
     match_over: Res<crate::sim::MatchOver>,
@@ -359,12 +361,16 @@ pub fn record_match(
         }
     };
 
+    // Store the opponent's display name when we learned it (via `Hello`),
+    // falling back to the short peer id for peers that never said hello.
+    let rival_name = names.0.get(&rival).cloned().unwrap_or_else(|| short_peer(rival));
+
     let result = {
         let Ok(conn) = db.lock() else { return };
         conn.execute(
             "INSERT INTO matches (happened_at, rival, my_score, opp_score, was_host, gateway_match_id)
              VALUES (datetime('now'), ?1, ?2, ?3, ?4, ?5)",
-            params![short_peer(rival), my_score, opp_score, was_host, active.0 as i64],
+            params![rival_name, my_score, opp_score, was_host, active.0 as i64],
         )
     };
     if result.is_ok() {

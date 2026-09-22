@@ -12,7 +12,7 @@ use libp2p::{Multiaddr, PeerId};
 
 use super::AppState;
 use crate::config::Config;
-use crate::history::MatchHistory;
+use crate::history::{MatchHistory, MatchRecord, HISTORY_LIMIT};
 use crate::networking::{GatewayState, NetChannels, NetCommand, NetEvent, short_peer};
 use crate::networking_demo::{IsHost, Peers};
 use crate::sim::{self};
@@ -179,6 +179,10 @@ pub struct AutoSearch(pub bool);
 /// Whether the options overlay is on screen.
 #[derive(Resource, Default)]
 pub struct OptionsOpen(pub bool);
+
+/// Whether the match history overlay is on screen.
+#[derive(Resource, Default)]
+pub struct HistoryOpen(pub bool);
 
 /// True until the player has picked a name on first launch.
 #[derive(Resource, Default)]
@@ -352,6 +356,10 @@ pub struct OptionsRoot;
 #[derive(Component)]
 pub struct OptionsInput;
 #[derive(Component)]
+pub struct HistoryRoot;
+#[derive(Component)]
+pub struct HistoryBackButton;
+#[derive(Component)]
 pub struct OnboardingRoot;
 #[derive(Component)]
 pub struct OnboardingInput;
@@ -400,12 +408,17 @@ pub enum TextLine {
     Status,
     Gateway,
     Record,
+    /// "Partidas pasadas" section header (hidden while there is no history).
+    HistoryHeader,
+    /// One pre-spawned row of the recent-matches panel, index into the list.
+    History(usize),
 }
 
 /// The main staircase menu buttons.
 #[derive(Clone, Copy, Component, PartialEq, Eq)]
 pub enum MenuButton {
     Play,
+    History,
     Options,
     Quit,
 }
@@ -752,6 +765,7 @@ pub fn spawn_menu(
                 TextColor(DIM),
             ),
             menu_button(MenuButton::Play, "Jugar"),
+            menu_button(MenuButton::History, "Historial"),
             menu_button(MenuButton::Options, "Opciones"),
             menu_button(MenuButton::Quit, "Salir"),
             (
@@ -987,6 +1001,151 @@ pub fn spawn_menu(
                         ),
                         (
                             OptionsButton::Back,
+                            Button,
+                            Node {
+                                min_width: px(160.),
+                                padding: UiRect::axes(px(26.), px(10.)),
+                                border: UiRect::all(px(2.)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::NONE),
+                            BorderColor::all(Color::WHITE),
+                            children![(
+                                ButtonText,
+                                Text::new("Volver"),
+                                TextFont::from_font_size(22.0),
+                                TextColor(Color::WHITE),
+                            )],
+                        ),
+                    ],
+                ),
+            ],
+        ),],
+    ));
+
+    // --- Match history panel ---
+    commands.spawn((
+        HistoryRoot,
+        Node {
+            width: percent(100.),
+            height: percent(100.),
+            position_type: PositionType::Absolute,
+            display: Display::None,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
+        children![(
+            Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: px(10.),
+                padding: UiRect::all(px(32.)),
+                border: UiRect::all(px(2.)),
+                ..default()
+            },
+            BackgroundColor(Color::BLACK),
+            BorderColor::all(Color::WHITE),
+            children![
+                (
+                    Text::new("Historial"),
+                    TextFont::from_font_size(42.0),
+                    TextColor(Color::WHITE),
+                ),
+                (
+                    TextLine::Record,
+                    Text::new(""),
+                    TextFont::from_font_size(14.0),
+                    TextColor(DIM),
+                ),
+                (
+                    TextLine::HistoryHeader,
+                    Text::new(""),
+                    TextFont::from_font_size(16.0),
+                    TextColor(Color::WHITE),
+                ),
+                (
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::FlexStart,
+                        min_width: px(380.),
+                        row_gap: px(4.),
+                        ..default()
+                    },
+                    children![
+                        (
+                            TextLine::History(0),
+                            Text::new(""),
+                            TextFont::from_font_size(14.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            TextLine::History(1),
+                            Text::new(""),
+                            TextFont::from_font_size(14.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            TextLine::History(2),
+                            Text::new(""),
+                            TextFont::from_font_size(14.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            TextLine::History(3),
+                            Text::new(""),
+                            TextFont::from_font_size(14.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            TextLine::History(4),
+                            Text::new(""),
+                            TextFont::from_font_size(14.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            TextLine::History(5),
+                            Text::new(""),
+                            TextFont::from_font_size(14.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            TextLine::History(6),
+                            Text::new(""),
+                            TextFont::from_font_size(14.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            TextLine::History(7),
+                            Text::new(""),
+                            TextFont::from_font_size(14.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            TextLine::History(8),
+                            Text::new(""),
+                            TextFont::from_font_size(14.0),
+                            TextColor(DIM),
+                        ),
+                        (
+                            TextLine::History(9),
+                            Text::new(""),
+                            TextFont::from_font_size(14.0),
+                            TextColor(DIM),
+                        ),
+                    ],
+                ),
+                // --- Buttons ---
+                (
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(16.),
+                        ..default()
+                    },
+                    children![
+                        (
+                            HistoryBackButton,
                             Button,
                             Node {
                                 min_width: px(160.),
@@ -1277,6 +1436,7 @@ pub fn spawn_menu(
 fn menu_button_width(action: MenuButton) -> f32 {
     match action {
         MenuButton::Play => 380.0,
+        MenuButton::History => 340.0,
         MenuButton::Options => 300.0,
         MenuButton::Quit => 220.0,
     }
@@ -1358,6 +1518,7 @@ pub fn despawn_menu(
         Or<(
             With<MenuRoot>,
             With<OptionsRoot>,
+            With<HistoryRoot>,
             With<OnboardingRoot>,
             With<PreMatchRoot>,
             With<ChatRoot>,
@@ -2307,6 +2468,40 @@ pub fn update_menu(
             }
         },
     );
+
+    set_text(
+        &mut labels,
+        TextLine::HistoryHeader,
+        if history.records.is_empty() {
+            String::new()
+        } else {
+            "Partidas pasadas:".to_string()
+        },
+    );
+    for (i, rec) in history.records.iter().take(HISTORY_LIMIT).enumerate() {
+        set_text(&mut labels, TextLine::History(i), history_line(rec));
+    }
+    for i in history.records.len().min(HISTORY_LIMIT)..HISTORY_LIMIT {
+        set_text(&mut labels, TextLine::History(i), String::new());
+    }
+}
+
+fn history_line(rec: &MatchRecord) -> String {
+    let result = if rec.my_score > rec.opp_score {
+        "V"
+    } else if rec.my_score < rec.opp_score {
+        "D"
+    } else {
+        "E"
+    };
+    let when = rec.happened_at.get(5..16).unwrap_or(&rec.happened_at);
+    let revoked = if rec.revoked { " · revocada" } else { "" };
+    format!(
+        "{when}  {rival}  {my}-{opp}  {result}{revoked}",
+        rival = rec.rival,
+        my = rec.my_score,
+        opp = rec.opp_score,
+    )
 }
 
 fn gateway_line(gateway: &GatewayState, matched: &GatewayMatch) -> String {
@@ -2362,6 +2557,7 @@ pub fn update_buttons(
     username: Res<Username>,
     channels: Res<NetChannels>,
     mut options_open: ResMut<OptionsOpen>,
+    mut history_open: ResMut<HistoryOpen>,
     mut pre: ResMut<PreMatch>,
     gw_addrs: Res<GatewayAddresses>,
     mut exit: MessageWriter<AppExit>,
@@ -2400,7 +2596,13 @@ pub fn update_buttons(
                     info!("Searching for opponents (LAN + WAN)");
                 }
             }
+            MenuButton::History => {
+                options_open.0 = false;
+                history_open.0 = true;
+                info!("Opening match history");
+            }
             MenuButton::Options => {
+                history_open.0 = false;
                 options_open.0 = true;
             }
             MenuButton::Quit => {
@@ -2741,6 +2943,36 @@ pub fn update_options(
             OptionsButton::Back => {
                 options_open.0 = false;
             }
+        }
+    }
+}
+
+/// Match history overlay: shows the recent matches and a "Volver" button.
+pub fn update_history(
+    mut root: Single<&mut Node, With<HistoryRoot>>,
+    button: Query<(Ref<Interaction>, &Children), With<HistoryBackButton>>,
+    mut button_texts: Query<&mut TextColor, (With<ButtonText>, Without<HistoryBackButton>)>,
+    mut history_open: ResMut<HistoryOpen>,
+) {
+    if !history_open.0 {
+        root.display = Display::None;
+        return;
+    }
+    root.display = Display::Flex;
+
+    for (interaction, children) in &button {
+        let hovered = *interaction == Interaction::Hovered;
+        for child in children {
+            if let Ok(mut tc) = button_texts.get_mut(*child) {
+                tc.0 = if hovered {
+                    Color::srgb(0.85, 0.85, 0.9)
+                } else {
+                    Color::BLACK
+                };
+            }
+        }
+        if interaction.is_changed() && *interaction == Interaction::Pressed {
+            history_open.0 = false;
         }
     }
 }

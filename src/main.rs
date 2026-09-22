@@ -2,7 +2,9 @@ use bevy::camera::ScalingMode;
 use bevy::math::bounding::{Aabb2d, BoundingVolume, IntersectsVolume};
 use bevy::prelude::*;
 use bevy::ui_widgets::ImeSystems;
+use bevy::winit::{UpdateMode, WinitSettings};
 use ponged::protocol;
+use std::time::Duration;
 
 use crate::config::Config;
 
@@ -452,10 +454,36 @@ fn cleanup_playing(
     }
 }
 
+/// Tracks the current `AppState` to keep `WinitSettings` energy mode in sync:
+/// the menu may idle at ~10 Hz while unfocused (big idle CPU/GPU savings), but
+/// a running match must keep rendering continuously even unfocused so remote
+/// snapshots and input never lag behind.
+fn apply_winit_energy_mode(
+    state: Res<State<AppState>>,
+    mut winit: ResMut<WinitSettings>,
+) {
+    let desired = if *state.get() == AppState::Menu {
+        UpdateMode::reactive_low_power(Duration::from_millis(100))
+    } else {
+        UpdateMode::Continuous
+    };
+    if winit.unfocused_mode != desired {
+        winit.unfocused_mode = desired;
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(networking::NetworkingPlugin)
+        .insert_resource(WinitSettings {
+            // The lobby animates its player network, so keep rendering while
+            // focused. When the window loses focus (menu is often left in the
+            // background) the engine drops to a ~10 Hz redraw, cutting the
+            // GPU/CPU idle burn that otherwise keeps the whole app busy.
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::reactive_low_power(Duration::from_millis(100)),
+        })
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(Score {
             player: 0,
@@ -481,6 +509,7 @@ fn main() {
         .init_resource::<menu::AutoSearch>()
         .init_resource::<menu::PeerNames>()
         .init_resource::<menu::OptionsOpen>()
+        .init_resource::<menu::HistoryOpen>()
         .init_resource::<menu::NeedsOnboarding>()
         .init_resource::<menu::DiscoveryTimer>()
         .init_resource::<menu::OrbitState>()
@@ -507,6 +536,10 @@ fn main() {
         .add_systems(
             Update,
             menu::update_options.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
+            menu::update_history.run_if(in_state(AppState::Menu)),
         )
         .add_systems(
             Update,
@@ -551,6 +584,7 @@ fn main() {
             (
                 menu::record_ping.run_if(in_state(AppState::Menu)),
                 menu::save_config_on_options_close,
+                apply_winit_energy_mode,
             )
                 .chain(),
         )
