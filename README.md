@@ -129,6 +129,10 @@ openssl en ningún sitio.
 
 ### Windows
 
+> Los binarios de **release** (`release.yml` de GitHub Actions) se compilan con
+> el target `x86_64-pc-windows-gnu`: son autónomos y **no** requieren el runtime
+> de Visual C++ (`VCRUNTIME140.dll`). El build local de dev usa MSVC.
+
 No hay soporte Nix en Windows; se compila con `cargo` nativo (toolchain MSVC).
 Requisitos:
 
