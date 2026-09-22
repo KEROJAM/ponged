@@ -2512,7 +2512,7 @@ pub fn update_menu(
                 n => format!("{n} partida{} revocada{}", if n == 1 { "" } else { "s" }, if n == 1 { "" } else { "s" }),
             }
         } else {
-            let base = format!("Récord: {wins}V / {losses}D / {draws}E");
+            let base = format!("Récord: {wins} Victoria / {losses} Derrota / {draws} Empate");
             match history.revoked_count() {
                 0 => base,
                 n => format!("{base} · {n} revocada{}", if n == 1 { "" } else { "s" }),
@@ -2530,29 +2530,55 @@ pub fn update_menu(
         },
     );
     for (i, rec) in history.records.iter().take(HISTORY_LIMIT).enumerate() {
-        set_text(&mut labels, TextLine::History(i), history_line(rec));
+        set_text(&mut labels, TextLine::History(i), history_line(rec, &names));
     }
     for i in history.records.len().min(HISTORY_LIMIT)..HISTORY_LIMIT {
         set_text(&mut labels, TextLine::History(i), String::new());
     }
 }
 
-fn history_line(rec: &MatchRecord) -> String {
+fn history_line(rec: &MatchRecord, names: &PeerNames) -> String {
     let result = if rec.my_score > rec.opp_score {
-        "V"
+        "Victoria"
     } else if rec.my_score < rec.opp_score {
-        "D"
+        "Derrota"
     } else {
-        "E"
+        "Empate"
     };
     let when = rec.happened_at.get(5..16).unwrap_or(&rec.happened_at);
+    let rival = rival_label(rec, names);
     let revoked = if rec.revoked { " · revocada" } else { "" };
     format!(
         "{when}  {rival}  {my}-{opp}  {result}{revoked}",
-        rival = rec.rival,
         my = rec.my_score,
         opp = rec.opp_score,
     )
+}
+
+/// Best display name for a match's opponent: the current session name when we
+/// know their peer id, otherwise the name stored alongside the record. Also
+/// recognizes legacy rows whose `rival` column holds a shortened peer id like
+/// `12D3KooX...abcd` and maps them to the connected peer's name.
+fn rival_label(rec: &MatchRecord, names: &PeerNames) -> String {
+    if let Some(pid) = rec.rival_peer.as_deref()
+        && let Ok(peer) = pid.parse::<PeerId>()
+        && let Some(name) = names.0.get(&peer)
+        && !name.trim().is_empty()
+    {
+        return name.clone();
+    }
+    if let Some((head, tail)) = rec.rival.split_once("...") {
+        for (peer, name) in &names.0 {
+            if name.trim().is_empty() {
+                continue;
+            }
+            let full = peer.to_base58();
+            if full.starts_with(head) && full.ends_with(tail) {
+                return name.clone();
+            }
+        }
+    }
+    rec.rival.clone()
 }
 
 fn gateway_line(gateway: &GatewayState, matched: &GatewayMatch, names: &PeerNames) -> String {

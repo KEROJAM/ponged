@@ -35,8 +35,14 @@ pub struct MatchRecord {
     /// Local timestamp of when the match finished.
     #[allow(dead_code)]
     pub happened_at: String,
-    #[allow(dead_code)]
+    /// Opponent's display name at the moment the match was recorded (best
+    /// effort: `"Jugador"` if we never heard a `Hello`, or a short peer id on
+    /// records written by old builds).
     pub rival: String,
+    /// Full base58 peer id of the opponent, so the lobby can resolve their
+    /// latest display name at render time (e.g. when the name arrived after
+    /// the match was recorded, or for legacy rows that only kept a peer id).
+    pub rival_peer: Option<String>,
     pub my_score: i32,
     pub opp_score: i32,
     #[allow(dead_code)]
@@ -138,6 +144,20 @@ impl MatchHistory {
                 )
                 .ok();
             }
+            let has_rival_peer = conn
+                .prepare("SELECT 1 FROM pragma_table_info('matches') WHERE name = 'rival_peer'")
+                .and_then(|mut stmt| stmt.query_row([], |_| Ok(())))
+                .optional()
+                .ok()
+                .flatten()
+                .is_some();
+            if !has_rival_peer {
+                conn.execute(
+                    "ALTER TABLE matches ADD COLUMN rival_peer TEXT",
+                    [],
+                )
+                .ok();
+            }
             self.db = Some(Mutex::new(conn));
             self.reload();
         }
@@ -148,7 +168,7 @@ impl MatchHistory {
         let Some(db) = &self.db else { return };
         let Ok(conn) = db.lock() else { return };
         let mut stmt = match conn.prepare(
-            "SELECT id, happened_at, rival, my_score, opp_score, was_host, gateway_match_id, revoked
+            "SELECT id, happened_at, rival, my_score, opp_score, was_host, gateway_match_id, revoked, rival_peer
              FROM matches ORDER BY id DESC LIMIT ?1",
         ) {
             Ok(s) => s,
@@ -169,6 +189,7 @@ impl MatchHistory {
                 was_host: was_host != 0,
                 gateway_match_id: row.get(6)?,
                 revoked: revoked != 0,
+                rival_peer: row.get(8).ok(),
             })
         });
         self.records = match rows {
@@ -362,15 +383,25 @@ pub fn record_match(
     };
 
     // Store the opponent's display name when we learned it (via `Hello`),
-    // falling back to a generic label for peers that never said hello.
+    // falling back to a generic label for peers that never said hello. The
+    // full peer id is stored alongside so the lobby can re-resolve the latest
+    // name for a record written while the name was still unknown.
     let rival_name = names.0.get(&rival).cloned().unwrap_or_else(|| "Jugador".to_string());
+    let rival_peer = rival.to_base58();
 
     let result = {
         let Ok(conn) = db.lock() else { return };
         conn.execute(
-            "INSERT INTO matches (happened_at, rival, my_score, opp_score, was_host, gateway_match_id)
-             VALUES (datetime('now'), ?1, ?2, ?3, ?4, ?5)",
-            params![rival_name, my_score, opp_score, was_host, active.0 as i64],
+            "INSERT INTO matches (happened_at, rival, my_score, opp_score, was_host, gateway_match_id, rival_peer)
+             VALUES (datetime('now'), ?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                rival_name,
+                my_score,
+                opp_score,
+                was_host,
+                active.0 as i64,
+                rival_peer,
+            ],
         )
     };
     if result.is_ok() {
