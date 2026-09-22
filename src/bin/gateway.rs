@@ -1851,45 +1851,46 @@ const MONITOR_HTML: &str = r#"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pong Gateway · Monitor de partidas</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: light; }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: ui-sans-serif, system-ui, Segoe UI, Roboto, sans-serif; background: #0e1117; color: #e6edf3; }
-  header { display: flex; align-items: baseline; gap: 14px; padding: 18px 24px; border-bottom: 1px solid #22262f; flex-wrap: wrap; }
-  h1 { font-size: 20px; margin: 0; }
-  header p { color: #8b949e; margin: 0; font-size: 13px; }
+  body { margin: 0; font-family: ui-monospace, "Cascadia Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace; background: #ffffff; color: #000; }
+  header { display: flex; align-items: baseline; gap: 14px; padding: 18px 24px; border-bottom: 1px solid #000; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .5px; }
+  header p { color: #000; opacity: .6; margin: 0; font-size: 12px; }
   header .mod { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-  header .mod a { color: #388bfd; text-decoration: none; font-size: 12px; }
+  header .mod a { color: #000; text-decoration: none; font-size: 12px; border-bottom: 1px solid #000; }
   main { padding: 18px 24px; max-width: 1200px; margin: 0 auto; }
   .stats { display: flex; gap: 12px; margin: 0 0 16px; flex-wrap: wrap; }
-  .stat { background: #161b26; border: 1px solid #22262f; border-radius: 10px; padding: 10px 16px; min-width: 150px; }
+  .stat { background: #fff; border: 1px solid #000; padding: 10px 16px; min-width: 150px; }
   .stat b { display: block; font-size: 22px; }
-  .stat span { color: #8b949e; font-size: 12px; }
-  table { width: 100%; border-collapse: collapse; background: #10151d; border: 1px solid #22262f; border-radius: 10px; overflow: hidden; }
-  th, td { padding: 10px 12px; text-align: left; font-size: 13px; border-bottom: 1px solid #1c212b; vertical-align: top; }
-  th { background: #161b26; color: #8b949e; text-transform: uppercase; font-size: 11px; letter-spacing: .5px; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
-  .played { background: #12281c; color: #3fb950; }
-  .pending { background: #2d1f00; color: #d29922; }
-  .revoked { background: #32090f; color: #f85149; text-decoration: line-through; }
-  .edited { background: #1c3a7d; color: #79c0ff; }
-  input.score { width: 46px; background: #0d1117; border: 1px solid #30363d; color: #e6edf3;
-                border-radius: 6px; padding: 5px 6px; font-size: 13px; text-align: center; }
-  input.score:focus { outline: none; border-color: #388bfd; }
-  button.ghost { background: transparent; color: #388bfd; border: 1px solid #30363d; }
-  button { background: #1f6feb; color: #fff; border: 0; border-radius: 6px; padding: 6px 11px; font-size: 12px; cursor: pointer; }
-  button:hover { background: #388bfd; }
-  button:disabled { background: #30363d; color: #6e7681; cursor: not-allowed; }
-  .vs { text-align: center; color: #8b949e; white-space: nowrap; }
-  .who { font-weight: 600; }
-  .meta { color: #8b949e; font-size: 11px; }
-  .sub { color: #6e7681; font-size: 11px; }
-  #toast { position: fixed; bottom: 16px; right: 16px; background: #161b26; border: 1px solid #22262f; border-radius: 8px; padding: 10px 14px; font-size: 13px; opacity: 0; transition: opacity .2s; max-width: 420px; }
+  .stat span { color: #000; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; opacity: .6; }
+  table { width: 100%; border-collapse: collapse; border: 1px solid #000; }
+  th, td { padding: 10px 12px; text-align: left; font-size: 12px; border-bottom: 1px solid #000; vertical-align: top; }
+  th { background: #000; color: #fff; text-transform: uppercase; font-size: 11px; letter-spacing: 1px; font-weight: 700; }
+  .badge { display: inline-block; padding: 2px 8px; font-size: 10px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; }
+  .played { color: #000; border: 1px solid #000; }
+  .pending { color: #000; border: 1px dashed #000; }
+  .revoked { color: #000; text-decoration: line-through; border: 1px solid #000; opacity: .5; }
+  .edited { color: #fff; background: #000; border: 1px solid #000; }
+  input.score { width: 46px; background: #fff; border: 1px solid #000; color: #000;
+                padding: 5px 6px; font-size: 13px; text-align: center; }
+  input.score:focus { outline: none; border-width: 2px; }
+  button.ghost { background: #fff; color: #000; border: 1px solid #000; }
+  button.ghost:hover { background: #000; color: #fff; }
+  button { background: #000; color: #fff; border: 1px solid #000; padding: 6px 11px; font-size: 12px; cursor: pointer; }
+  button:hover { background: #fff; color: #000; }
+  button:disabled { background: #fff; color: #999; border-color: #999; cursor: not-allowed; }
+  .vs { text-align: center; white-space: nowrap; font-weight: 700; }
+  .who { font-weight: 700; }
+  .meta { font-size: 11px; opacity: .6; }
+  .sub { font-size: 11px; opacity: .5; }
+  #toast { position: fixed; bottom: 16px; right: 16px; background: #000; color: #fff; padding: 10px 14px; font-size: 12px; opacity: 0; transition: opacity .2s; max-width: 420px; }
   #toast.show { opacity: 1; }
 </style>
 </head>
 <body>
 <header>
-  <h1>&#127955; Pong Gateway · Monitor de partidas</h1>
+  <h1>PONG GATEWAY · Monitor de partidas</h1>
   <p id="stamp">cargando…</p>
   <p class="mod">%MODERADOR% · <a href="/logout">salir</a></p>
 </header>
@@ -2054,31 +2055,27 @@ const LOGIN_HTML: &str = r#"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pong Gateway · Acceso moderador</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: light; }
   * { box-sizing: border-box; }
   body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-         font-family: ui-sans-serif, system-ui, Segoe UI, Roboto, sans-serif;
-         background: #0e1117; color: #e6edf3; padding: 24px; }
-  .card { background: #161b26; border: 1px solid #22262f; border-radius: 12px;
-          padding: 32px; width: 100%; max-width: 360px; }
-  h1 { font-size: 19px; margin: 0 0 6px; }
-  .sub { color: #8b949e; font-size: 13px; margin: 0 0 20px; }
-  .err { background: #32090f; color: #f85149; border-radius: 8px; font-size: 13px;
-         padding: 9px 12px; margin: 0 0 16px; }
-  label { display: block; font-size: 12px; color: #8b949e; margin: 0 0 14px; }
+         font-family: ui-monospace, "Cascadia Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+         background: #fff; color: #000; padding: 24px; }
+  .card { background: #fff; border: 1px solid #000; padding: 32px; width: 100%; max-width: 360px; }
+  h1 { font-size: 18px; margin: 0 0 6px; letter-spacing: .5px; }
+  .sub { font-size: 12px; margin: 0 0 20px; opacity: .6; }
+  .err { background: #000; color: #fff; font-size: 12px; padding: 9px 12px; margin: 0 0 16px; }
+  label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; margin: 0 0 14px; opacity: .8; }
   label span { display: block; margin-bottom: 5px; }
-  input { width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
-          color: #e6edf3; padding: 10px 12px; font-size: 14px; }
-  input:focus { outline: none; border-color: #388bfd; }
-  button { width: 100%; margin-top: 6px; background: #1f6feb; color: #fff; border: 0;
-           border-radius: 8px; padding: 11px; font-size: 14px; cursor: pointer; }
-  button:hover { background: #388bfd; }
-  .foot { margin-top: 18px; font-size: 12px; color: #6e7681; text-align: center; }
+  input { width: 100%; background: #fff; border: 1px solid #000; color: #000; padding: 10px 12px; font-size: 14px; }
+  input:focus { outline: none; border-width: 2px; }
+  button { width: 100%; margin-top: 6px; background: #000; color: #fff; border: 1px solid #000; padding: 11px; font-size: 14px; cursor: pointer; }
+  button:hover { background: #fff; color: #000; }
+  .foot { margin-top: 18px; font-size: 11px; opacity: .6; text-align: center; }
 </style>
 </head>
 <body>
 <main class="card">
-  <h1>&#128274; Pong Gateway · Moderación</h1>
+  <h1>PONG GATEWAY · Moderación</h1>
   <p class="sub">El monitor de partidas está bloqueado. Inicia sesión con tu cuenta de moderador.</p>
   %ERROR%
   <form method="post" action="/login" autocomplete="off">
