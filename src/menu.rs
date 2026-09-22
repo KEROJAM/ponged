@@ -1849,16 +1849,38 @@ pub fn on_rendezvous_discovered(ev: On<NetEvent>, peers: Res<Peers>, channels: R
 /// keep appearing for others. Runs for as long as the gateway relay is
 /// connected (not only while "Jugar" is active), so players who are seated in
 /// the lobby remain reachable for chat; match invites stay gated by `search`.
+///
+/// Also dials the gateway once from the lobby: before, the gateway was only
+/// dialed by "Jugar", so a seated player had no connection, discovery never
+/// ran, and chat had nobody to reach until a hunt started.
 pub fn update_discovery(
     time: Res<Time>,
     mut timer: ResMut<DiscoveryTimer>,
     mut register: ResMut<RegistrationTimer>,
-    gateway: Res<GatewayState>,
+    mut gateway: ResMut<GatewayState>,
+    gw_addrs: Res<GatewayAddresses>,
     channels: Res<NetChannels>,
     mut was_ready: Local<bool>,
 ) {
     timer.0.tick(time.delta());
     register.0.tick(time.delta());
+
+    // One-shot lobby connect so rendezvous discovery, the roster and chat all
+    // work before "Jugar" is pressed. `start_search` re-dials if this fails.
+    if gateway.peer.is_none() && gateway.addr.is_none() {
+        let addr_str = (*gw_addrs)
+            .0
+            .first()
+            .map(|e| e.address.clone())
+            .unwrap_or_else(|| GATEWAY_DEFAULT_ADDR.to_string());
+        let addr: Multiaddr = addr_str.parse().unwrap_or_else(|e| {
+            warn!("Bad gateway address: {e}");
+            GATEWAY_DEFAULT_ADDR.parse().expect("default address is valid")
+        });
+        gateway.addr = Some(addr.clone());
+        let _ = channels.commands.send(NetCommand::Dial(addr));
+        info!("Dialing gateway from lobby for discovery/chat");
+    }
 
     let peer = gateway.peer;
     let gateway_address = match peer {
