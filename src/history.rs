@@ -20,7 +20,7 @@ const DB_ENCRYPTION_KEY: &str = "ponged-v1-encrypted-history";
 
 use crate::Score;
 use crate::menu::{ActiveMatch, Opponent, PeerNames};
-use crate::networking::{GatewayState, NetChannels, NetCommand, short_peer};
+use crate::networking::{GatewayState, NetChannels, NetCommand};
 use crate::networking_demo::{IsHost, RemoteWorld};
 use ponged::protocol::{GatewayRequest, RatingProof, DEFAULT_RATING};
 
@@ -362,8 +362,8 @@ pub fn record_match(
     };
 
     // Store the opponent's display name when we learned it (via `Hello`),
-    // falling back to the short peer id for peers that never said hello.
-    let rival_name = names.0.get(&rival).cloned().unwrap_or_else(|| short_peer(rival));
+    // falling back to a generic label for peers that never said hello.
+    let rival_name = names.0.get(&rival).cloned().unwrap_or_else(|| "Jugador".to_string());
 
     let result = {
         let Ok(conn) = db.lock() else { return };

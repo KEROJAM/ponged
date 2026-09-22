@@ -13,7 +13,7 @@ use libp2p::{Multiaddr, PeerId};
 use super::AppState;
 use crate::config::Config;
 use crate::history::{MatchHistory, MatchRecord, HISTORY_LIMIT};
-use crate::networking::{GatewayState, NetChannels, NetCommand, NetEvent, short_peer};
+use crate::networking::{GatewayState, NetChannels, NetCommand, NetEvent};
 use crate::networking_demo::{IsHost, Peers};
 use crate::sim::{self};
 use ponged::protocol::{
@@ -1070,7 +1070,7 @@ pub fn spawn_menu(
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::FlexStart,
                         min_width: px(380.),
-                        row_gap: px(4.),
+                        row_gap: px(16.),
                         ..default()
                     },
                     children![
@@ -2345,7 +2345,7 @@ pub fn on_chat_message(
         return;
     };
     if let GameRequest::Chat { text } = request {
-        let from_name = names.0.get(peer).cloned().unwrap_or_else(|| short_peer(*peer));
+        let from_name = names.0.get(peer).cloned().unwrap_or_else(|| "Jugador".to_string());
         chat_buffer.push(ChatMessage {
             from_name: from_name.clone(),
             text: text.clone(),
@@ -2403,7 +2403,6 @@ fn set_text(labels: &mut Query<(&mut Text, &TextLine)>, kind: TextLine, text: St
 /// Refreshes the menu text lines.
 #[allow(clippy::too_many_arguments)]
 pub fn update_menu(
-    local: Res<LocalPeerId>,
     username: Res<Username>,
     search: Res<AutoSearch>,
     peers: Res<Peers>,
@@ -2411,6 +2410,7 @@ pub fn update_menu(
     matched: Res<GatewayMatch>,
     pre: Res<PreMatch>,
     history: Res<MatchHistory>,
+    names: Res<PeerNames>,
     mut labels: Query<(&mut Text, &TextLine)>,
 ) {
     set_text(
@@ -2418,10 +2418,7 @@ pub fn update_menu(
         TextLine::You,
         match &gateway.rank {
             Some(rank) => format!("{}  ·  {}", username.0, rank),
-            None => match local.0 {
-                Some(id) => format!("{}  ·  {}", username.0, short_peer(id)),
-                None => username.0.clone(),
-            },
+            None => username.0.clone(),
         },
     );
 
@@ -2448,7 +2445,7 @@ pub fn update_menu(
     set_text(
         &mut labels,
         TextLine::Gateway,
-        gateway_line(&gateway, &matched),
+        gateway_line(&gateway, &matched, &names),
     );
 
     let (wins, losses, draws) = history.wins_losses();
@@ -2504,9 +2501,13 @@ fn history_line(rec: &MatchRecord) -> String {
     )
 }
 
-fn gateway_line(gateway: &GatewayState, matched: &GatewayMatch) -> String {
+fn gateway_line(gateway: &GatewayState, matched: &GatewayMatch, names: &PeerNames) -> String {
     if let Some(peer) = matched.0 {
-        return format!("¡Emparejado! Conectando con {}", short_peer(peer));
+        let who = match names.0.get(&peer) {
+            Some(name) if !name.trim().is_empty() => name.clone(),
+            _ => "Rival".to_string(),
+        };
+        return format!("¡Emparejado! Conectando con {who}");
     }
     match (gateway.connected, gateway.reserved, gateway.queued) {
         (false, _, _) => "Gateway: no conectado".to_string(),
@@ -2753,7 +2754,7 @@ fn resume_search(
 fn peer_label(names: &PeerNames, peer: PeerId) -> String {
     match names.0.get(&peer) {
         Some(name) if !name.trim().is_empty() => name.clone(),
-        _ => short_peer(peer),
+        _ => "Jugador".to_string(),
     }
 }
 
@@ -3160,7 +3161,7 @@ fn spawn_node(commands: &mut Commands, assets: &GraphAssets, peer: PeerId, angle
     commands.spawn((
         NodeOf(peer),
         NodeLabel,
-        Text2d::new(short_peer(peer)),
+        Text2d::new("Jugador"),
         TextFont::from_font_size(NODE_FONT),
         TextColor(Color::WHITE),
         Transform::from_translation(
@@ -3293,7 +3294,7 @@ pub fn update_node_graph(
                 .0
                 .get(&node.0)
                 .cloned()
-                .unwrap_or_else(|| short_peer(node.0));
+                .unwrap_or_else(|| "Jugador".to_string());
             if txt.0 != name {
                 txt.0 = name;
             }

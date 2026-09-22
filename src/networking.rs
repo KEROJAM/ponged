@@ -182,17 +182,6 @@ impl GatewayState {
     }
 }
 
-/// A short, readable slice of a peer id for display (`12D3Koo...abcd`).
-pub fn short_peer(peer: PeerId) -> String {
-    let base58 = peer.to_base58();
-    let len = base58.len();
-    if len <= 16 {
-        base58
-    } else {
-        format!("{}...{}", &base58[..8], &base58[len - 4..])
-    }
-}
-
 pub struct NetworkingPlugin;
 
 impl Plugin for NetworkingPlugin {
