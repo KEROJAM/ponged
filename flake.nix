@@ -70,20 +70,20 @@
     };
 
     # ── Gateway binary (headless, musl estatico) ────────────────────
-    packages."x86_64-linux".pong-gateway = muslRust.buildRustPackage {
-      pname = "pong-gateway";
+    packages."x86_64-linux".ponged-gateway = muslRust.buildRustPackage {
+      pname = "ponged-gateway";
       version = "0.1.0";
       src = ./.;
       cargoLock.lockFile = ./Cargo.lock;
       nativeBuildInputs = [static.pkg-config pkgs.perl];
       buildInputs = [static.wayland static.libudev-zero static.openssl];
       RUSTFLAGS = staticFlags;
-      cargoBuildFlags = ["--bin" "pong-gateway"];
+      cargoBuildFlags = ["--bin" "ponged-gateway"];
     };
 
     # ── Game client binary (Bevy + Vulkan, glibc dinámico) ──────────
-    packages."x86_64-linux".pong-client = pkgs.rustPlatform.buildRustPackage {
-      pname = "pong-client";
+    packages."x86_64-linux".ponged = pkgs.rustPlatform.buildRustPackage {
+      pname = "ponged";
       version = "0.1.1";
       src = ./.;
       cargoLock.lockFile = ./Cargo.lock;
@@ -94,31 +94,31 @@
 
     # ── Docker image (gateway only, minimal) ────────────────────────
     packages."x86_64-linux".dockerImage = pkgs.dockerTools.buildLayeredImage {
-      name = "pong-gateway";
+      name = "ponged-gateway";
       tag = "latest";
-      contents = [self.packages."x86_64-linux".pong-gateway];
+      contents = [self.packages."x86_64-linux".ponged-gateway];
       config = {
-        Cmd = ["pong-gateway" "--listen" "/ip4/0.0.0.0/tcp/4001"];
+        Cmd = ["ponged-gateway" "--listen" "/ip4/0.0.0.0/tcp/4001"];
         ExposedPorts = {"4001/tcp" = {};};
       };
     };
 
     # ── systemd unit (works en CUALQUIER distro con systemd) ────────
-    # Genera /etc/systemd/system/pong-gateway.service a partir del
-    # binario estatico. La IP publica se lee de /etc/pong-gateway.env
+    # Genera /etc/systemd/system/ponged-gateway.service a partir del
+    # binario estatico. La IP publica se lee de /etc/ponged-gateway.env
     # (PONG_PUBLIC=...), asi no hay que regenerar nada si cambia la EIP.
-    packages."x86_64-linux".systemdUnit = pkgs.runCommand "pong-gateway-systemd-unit" {} ''
+    packages."x86_64-linux".systemdUnit = pkgs.runCommand "ponged-gateway-systemd-unit" {} ''
       mkdir -p $out
-      cat > $out/pong-gateway.service <<'EOF'
+      cat > $out/ponged-gateway.service <<'EOF'
       [Unit]
       Description=Pong P2P Matchmaking Gateway
       After=network.target
 
       [Service]
-      EnvironmentFile=/etc/pong-gateway.env
-      ExecStart=/usr/local/bin/pong-gateway --listen /ip4/0.0.0.0/tcp/4001 --public ''${PONG_PUBLIC}
-      WorkingDirectory=/var/lib/pong-gateway
-      StateDirectory=pong-gateway
+      EnvironmentFile=/etc/ponged-gateway.env
+      ExecStart=/usr/local/bin/ponged-gateway --listen /ip4/0.0.0.0/tcp/4001 --public ''${PONG_PUBLIC}
+      WorkingDirectory=/var/lib/ponged-gateway
+      StateDirectory=ponged-gateway
       Restart=on-failure
       RestartSec=5
 
@@ -128,30 +128,30 @@
     '';
 
     # Scrip que copia binario + unit y activa el servicio (distro-agnostico).
-    packages."x86_64-linux".installSystemd = pkgs.writeShellScriptBin "install-pong-gateway" ''
+    packages."x86_64-linux".installSystemd = pkgs.writeShellScriptBin "install-ponged-gateway" ''
       set -euo pipefail
-      BIN=${self.packages."x86_64-linux".pong-gateway}/bin/pong-gateway
-      UNIT=${self.packages."x86_64-linux".systemdUnit}/pong-gateway.service
+      BIN=${self.packages."x86_64-linux".ponged-gateway}/bin/ponged-gateway
+      UNIT=${self.packages."x86_64-linux".systemdUnit}/ponged-gateway.service
 
-      install -m 0755 "$BIN" /usr/local/bin/pong-gateway
-      install -m 0644 "$UNIT" /etc/systemd/system/pong-gateway.service
+      install -m 0755 "$BIN" /usr/local/bin/ponged-gateway
+      install -m 0644 "$UNIT" /etc/systemd/system/ponged-gateway.service
 
-      if [ ! -e /etc/pong-gateway.env ]; then
-        echo "PONG_PUBLIC=<EIP_ELASTICA>" > /etc/pong-gateway.env
-        echo "OJO: edita /etc/pong-gateway.env con la IP publica real."
+      if [ ! -e /etc/ponged-gateway.env ]; then
+        echo "PONG_PUBLIC=<EIP_ELASTICA>" > /etc/ponged-gateway.env
+        echo "OJO: edita /etc/ponged-gateway.env con la IP publica real."
       fi
 
       systemctl daemon-reload
-      systemctl enable --now pong-gateway
+      systemctl enable --now ponged-gateway
     '';
 
     # ── NixOS module (systemd service) ──────────────────────────────
-    nixosModules.pong-gateway = { config, lib, pkgs, ... }: let
-      cfg = config.services.pong-gateway;
+    nixosModules.ponged-gateway = { config, lib, pkgs, ... }: let
+      cfg = config.services.ponged-gateway;
     in {
-      options.services.pong-gateway = {
+      options.services.ponged-gateway = {
         enable = lib.mkEnableOption "Pong P2P matchmaking gateway";
-        package = lib.mkPackageOption pkgs "pong-gateway" {};
+        package = lib.mkPackageOption pkgs "ponged-gateway" {};
         listen = lib.mkOption {
           type = lib.types.str;
           default = "/ip4/0.0.0.0/tcp/4001";
@@ -166,18 +166,18 @@
       };
 
       config = lib.mkIf cfg.enable {
-        systemd.services.pong-gateway = {
+        systemd.services.ponged-gateway = {
           description = "Pong P2P Matchmaking Gateway";
           after = ["network.target"];
           wantedBy = ["multi-user.target"];
           serviceConfig = {
             ExecStart = lib.concatStringsSep " " [
-              "${cfg.package}/bin/pong-gateway"
+              "${cfg.package}/bin/ponged-gateway"
               "--listen" cfg.listen
               "--public" cfg.public
             ];
-            WorkingDirectory = "/var/lib/pong-gateway";
-            StateDirectory = "pong-gateway";
+            WorkingDirectory = "/var/lib/ponged-gateway";
+            StateDirectory = "ponged-gateway";
             DynamicUser = true;
             Restart = "on-failure";
             RestartSec = 5;
