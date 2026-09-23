@@ -1,0 +1,226 @@
+#+TITLE: Proyecto Final — ponged
+#+SUBTITLE: Un Pong 2D multijugador P2P en Rust
+#+AUTHOR: Proyecto Final · Ingeniería de Software
+#+DATE: 2026-09-23
+#+OPTIONS: toc:nil num:t tex:t
+
+* Introducción
+
+=ponged= es un Pong 2D multijugador *P2P* en Rust (Bevy + libp2p). El host
+simula el juego de forma autoritativa en un hilo headless a 64 Hz y publica
+snapshots; el guest las recibe a 30 Hz, interpola y predice para compensar la
+latencia. Un *gateway* separado actúa de matchmaker (fila por ELO + rangos) y
+de relay para atravesar NAT.
+
+El presente documento es el informe de cierre y contiene:
+
+1. Una comparación entre la planificación del sistema y su implementación.
+2. Las lecciones aprendidas durante la planificación y la implementación.
+3. Una propuesta de plan de mejora.
+
+** Datos del proyecto
+
+| Campo                | Valor                                          |
+|----------------------+-------------------------------------------------|
+| Nombre               | ponged (antes Proyecto-Final)                  |
+| Lenguaje             | Rust (edition 2024)                            |
+| Ecosistema           | Bevy 0.19 · libp2p 0.56 · rusqlite/SQLCipher   |
+| Binarios             | ponged-cliente · ponged-gateway                |
+| Líneas de código     | ~9600 (src + src/bin)                          |
+| Tests unitarios      | 36 (4 módulos)                                |
+| CI/CD                | GitHub Actions (build, tests, release, Sonar) |
+| Despliegue           | Nix flakes · Docker · NixOS · binario musl    |
+
+* Comparación entre la planificación del sistema y su implementación
+
+La planificación se organizó en *milestones* (M1–M9) repartidos en *6 sprints*.
+La siguiente tabla compara el alcance planificado con lo efectivamente
+implementado, y las secciones siguientes detallan las desviaciones.
+
+| Mit. | Planificado                                            | Implementado                                                      | Estado |
+|------+--------------------------------------------------------+-------------------------------------------------------------------+--------|
+| M1   | Separar proyecto en librería y dos binarios; protocolo  | =lib.rs= solo con tipos de protocolo; bins =ponged-cliente= y     | Hecho  |
+|      | de red con gobernanza (elig. de host)                   | =ponged-gateway=; snapshots + RPC de matchmaking por CBOR          |        |
+| M2   | Gateway con relay, rendezvous y cola de matchmaking;    | Gateway con circuit-relay v2, rendezvous, Kademlia y fila ELO;    | Hecho  |
+|      | simulación autoritativa; historial local                | sim headless a 64 Hz en hilo dedicado; historial SQLCipher        |        |
+| M3   | Descubrimiento WAN y conectividad P2P (rendezvous,      | Rendezvous client, Kademlia, relay client y DCUtR; cambiado a     | Parcial|
+|      | Kademlia, relay, hole-punching)                         | transporte TCP-only (sin QUIC): DCUtR no hace hole-punch real     |        |
+| M4   | Empaquetado y despliegue                                | Flake Nix, imagen Docker, módulo NixOS, unit systemd genérico,    | Hecho  |
+|      |                                                        | releases automáticas con binarios por plataforma                  |        |
+| M5   | Lobby / menú con emparejamiento                         | Lobby con onboarding, opciones, grafo de peers, chat, autobúsqueda| Hecho  |
+|      |                                                        | y coincidencia de partidas con diálogo de aceptación              |        |
+| M6   | Matchmaking del gateway                                 | Fila ELO, rangos (Brick→Pong Legend), ELO firmado (ledger) y      | Hecho  |
+|      |                                                        | moderación vía página HTTP (revocar/corregir marcadores)          |        |
+| M7   | Migración de host                                       | Si el host sale, el guest toma el mando sin volver al menú        | Hecho  |
+| M8   | Interpolación y predicción                              | Interpolación entre snapshots + predicción con corrección suave   | Hecho  |
+| M9   | Historial local y ranking                               | Historial en SQLite cifrado (SQLCipher) + reporte al gateway      | Hecho  |
+
+** Desviaciones respecto al plan
+
+1. *Hole-punching real* (M3, parcial). El plan contemplaba conectividad P2P
+   directa; en la implementación el transporte es *solo TCP* (sin QUIC), por lo
+   que DCUtR no consigue agujeros en NAT y *todo el tráfico de partida fluye a
+   través del relay*. Se documentó como comportamiento esperado y suficiente
+   para el alcance del proyecto.
+
+2. *Ampliaciones funcionales no previstas.* Se agregaron funcionalidades que
+   no estaban en el plan original:
+   - Rangos ELO (Brick → Pong Legend) con barra de progreso.
+   - Diálogo de aceptación de partidas antes de iniciar.
+   - *Ledger de rating firmado* con ed25519 + anti-replay: permite recuperar el
+     ELO de los jugadores aunque el gateway pierda su base de datos.
+   - Página HTTP de moderación (revocar partida tramposa o corregir marcador).
+   - Lista de servidores gateway en JSON con ordenación por ping.
+   - Reconexión robusta ante caída del circuito de relay a mitad de partida.
+   - Integración SonarQube (calidad/seguridad) en el pipeline de CI.
+
+3. *Cambios de empaquetado.* SQLCipher y OpenSSL se compilan *dentro* del
+   binario (feature =bundled-sqlcipher-vendored-openssl=), el gateway se
+   produce 100 % estático (musl) y los releases de Windows usan el target
+   =x86_64-pc-windows-gnu= para no depender de VCRUNTIME. El plan original no
+   detallaba este nivel de autosuficiencia del binario.
+
+4. *Renombre y soporte gráfico.* En el Sprint 5 el proyecto pasó de llamarse
+   Proyecto-Final a *ponged*, y se agregó el backend X11 a Bevy para cubrir
+   sesiones Wayland y X11.
+
+** Evolución por sprints
+
+| Sprint | Periodo     | Foco                                                                 |
+|--------+-------------+----------------------------------------------------------------------|
+| 1      | 2026-08-12 → 2026-09-06 | Estructura lib/bin, protocolo con gobernanza de host, primeros networks |
+| 2      | 2026-09-06 → 2026-09-09 | Gateway (relay/rendezvous/ELO), sim autoritativa 64 Hz, historial     |
+| 3      | 2026-09-09 | Descubrimiento WAN (Kademlia, relay, DCUtR), lobby, migración de host |
+| 4      | 2026-09-09 | Empaquetado Nix/Docker/NixOS, releases CI, interpolación y predicción|
+| 5      | 2026-09-12 | Backend X11, actualización del entorno, renombre a ponged             |
+| 6      | 2026-09-12 | Rangos ELO, victoria 5-0 + rally, lobby renovado, tests CI, Docker   |
+| Post   | 2026-09-15 → 2026-09-23 | Releases, servidores gateway con ping, SonarQube, moderación,          |
+|        |            | reconexión, detalle de partidas en historial                          |
+
+* Lecciones aprendidas
+
+** Durante la planificación
+
+1. *El alcance de la red P2P se subestimó.* La mayor parte del esfuerzo
+   terminó concentrada en la capa de red y en el menú/lobby, no en el juego en
+   sí: el Pong base estuvo listo muy pronto (primer commit del juego en agosto)
+   y el resto del tiempo se invirtió en matchmaking, descubrimiento, relay y
+   migración de host. La planificación debió dimensionar mejor las tareas de
+   interconexión y protocolo.
+
+2. *Los milestones fueron útiles por su granularidad.* Separar el trabajo en
+   M1–M9 permitió integrar de forma incremental (estructura → red → sim →
+   lobby → empaquetado) y desplegar siempre de extremo a extremo. La jerarquía
+   binaria gateway ↔ cliente resultó acertada para aislar Bevy del servidor.
+
+3. *Definir el transporte antes que el hole-punching.* Se planificó DCUtR sin
+   fijar el transporte de antemano; elegir TCP sin QUIC obligó a asumir que
+   todo el tráfico pasaría por el relay. Una decisión de transporte
+   explícitamente temprana habría evitado esa re-tarea.
+
+** Durante la implementación
+
+1. *Elegir Nix flakes temprano fue una gran inversión.* El entorno reproducible
+   (Rust + bibliotecas de sistema Wayland/X11/udev) eliminó "en mi máquina
+   funciona" y facilitó compilar para Linux, Windows y contenedores desde la
+   misma especificación.
+
+2. *La UI de Bevy concentró numerosos bugfixes.* El historial de commits
+   muestra una larga cola de correcciones en =menu.rs= (botones que se pulsaban
+   varias veces, chat no interactivo, foco/IME para el envío con Enter, límite
+   de 16 parámetros por sistema de Bevy resuelto con un recurso =GatewayState=,
+   crasheos de Windows). Conviene reservar esfuerzo de pulido de UI en la
+   estimación.
+
+3. *El CI de compilación cruzada es un proyecto en sí.* Compilar SQLCipher y
+   OpenSSL para Windows-GNU requirió Perl/make de MSYS2; el gateway musl
+   estático necesitó un flake específico; los binarios de Windows tuvieron que
+   pasarse al target GNU para ser autónomos. Estas trampas de empaquetado
+   robaron varias iteraciones y merecían haberse planificado como una tarea
+   dedicada.
+
+4. *La identidad y persistencia del gateway son críticas.* =gateway.key=
+   (PeerId) y =gateway.sqlite= (ratings) deben persistirse siempre; perder la
+   clave cambia la identidad del servidor y rompe a los clientes. El **ledger
+   de rating firmado** se diseñó precisamente para que un gateway rehabilitado
+   (o reemplazado con la misma clave) pueda recuperar el ELO desde las pruebas
+   de los propios jugadores. Esta resiliencia fue valiosa y debería repetirse
+   en componentes parecidos.
+
+5. *Los tests inline plantan raíz fácil.* 36 tests unitarios en =config.rs=,
+   =sim.rs=, =protocol.rs= y =gateway.rs= cubren rangos, ELO, roundtrip CBOR,
+   retrocompatibilidad del snapshot y condición de victoria. Sirven además como
+   especificación ejecutable del protocolo.
+
+** De la comparación plan-implementación
+
+1. *El concepto "gateway híbrido" cumplió su papel.* Pequeño, headless,
+   desplegable en Docker/NixOS/AWS, y a la vez servía de relay, rendezvous,
+   DHT y matchmaker. La planificación acertó al centralizar ahí la lógica
+   compartida en vez de duplicarla en cada cliente.
+
+2. *Conveniencia de documentar las limitaciones aceptadas.* Notas como "todo el
+   tráfico fluye por el relay" o "solo TCP" se documentaron explícitamente, lo
+   que evita promesas incumplidas y facilita el plan de mejora.
+
+* Propuesta de plan de mejora
+
+** A corto plazo
+
+1. *Pruebas de integración E2E.* Automatizar una partida real cliente↔cliente
+   vía gateway en CI (dos clientes headless + simulación), cubriendo emparejamiento,
+   partida completa, migración de host y reconexión de relay.
+
+2. *Métricas y monitoreo del gateway.* Exportar métricas (jugadores en fila,
+   partidas activas, tráfico de relay, errores) y alarmas para el despliegue en
+   AWS; el gateway hoy carece de telemetría operativa.
+
+3. *Gestión de secretos.* La clave de cifrado del historial local está embebida
+   en el binario (=history.rs=). Migrar a un esquema de derivación desde una
+   clave de dispositivo/OS y eliminar la constante.
+
+4. *Despliegue automatizado.* Disparar el despliegue del gateway en AWS desde
+   un tag de release (Actions), reutilizando la imagen Docker ya existente.
+
+** A medio plazo
+
+1. *Transporte QUIC y hole-punching real.* Migrar libp2p a QUIC (o WebTransport)
+   para que DCUtR complete agujeros en NAT y el tráfico de partida deje de
+   depender del relay; reduce latencia y costo de ancho de banda del gateway.
+
+2. *Anticheat y antifraude.* Revisar el flujo de =ReportResult= para impedir el
+   granjeo de ELO (partidas autoacordadas) y añadir validación de consistencia
+   en el gateway (tiempos, puntuaciones imposibles) además de la moderación
+   manual ya existente.
+
+3. *Mejoras de matchmaking.* Emparejar por *región + ping* además de ELO, y
+   acotar el tiempo máximo de espera en fila con rangos de tolerancia creciente.
+
+4. *Replays y espectadores.* Grabar snapshots de la partida para reproducir
+   después en el cliente, y permitir observar retrasos de espectador.
+
+** A largo plazo
+
+1. *Clientes web y móviles.* Portar la capa de partida (sim + interpolación) a
+   un target WebAssembly/WGPU y a móvil; el protocolo ya es independiente de
+   Bevy, lo que facilita el port.
+
+2. *Torneos y modos de juego.* Añadir torneos gestionados por el gateway y
+   variantes (Power Pong, dobles) reutilizando la simulación y el ledger ELO.
+
+3. *Escalado del gateway.* Separar físicamente relay y matchmaking con
+   despliegues regionales y failover, usando el mismo protocolo con direcciones
+   /dns4/ y el sistema de lista de servidores ya existente.
+
+4. *Hardening del motor de rango.* Hacer configurable el factor K del ELO y
+   evaluar variantes (Glicko-2) para refinar el frozen inicial (Brick) y el
+   progreso dentro del rango.
+
+* Conclusiones
+
+El sistema se implementó con éxito: los 9 milestones planificados se cubrieron
+en 6 sprints, con la mayoría completos y una desviación técnica acotada (el
+hole-punching por la elección de transporte TCP). Las principales ganancias
+fueron la arquitectura binaria cliente/gateway, el ecosistema reproducible con
+Nix y el diseño resiliente del ledger de ratings. La principal deuda es la
+telemetría y las pruebas E2E, prioridades del plan de mejora propuesto.
