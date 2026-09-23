@@ -13,7 +13,8 @@ Workflow [`.github/workflows/sonar.yml`](.github/workflows/sonar.yml):
 2. Genera el reporte de **Clippy** → `target/clippy.json`.
 3. Sube ambos como artefacto (`reportes-sonarqube`) — entregable del repo.
 4. Ejecuta el **SonarQube Scanner** (importa LCOV + Clippy; no recompila).
-5. Aplica el **Quality Gate**: el pipeline falla si no se aprueba.
+5. El **Quality Gate** lo evalúa la integración de SonarCloud en GitHub
+   (check "SonarCloud Code Analysis"), no se fuerza con una action aparte.
 
 Se ejecuta en `push` a `main`, en cada PR y manualmente
 (`Actions → SonarQube → Run workflow`).

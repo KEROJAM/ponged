@@ -57,12 +57,3 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@v5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-      # Puerta de calidad: falla el job si el proyecto no pasa el Quality Gate.
-      - name: Quality Gate
-        uses: SonarSource/sonarqube-quality-gate-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-          scanMetadataReportFile: .scannerwork/report-task.txt
-        timeout-minutes: 10
