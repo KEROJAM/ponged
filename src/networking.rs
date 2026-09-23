@@ -107,6 +107,16 @@ pub enum NetEvent {
     DcutrEstablished {
         peer: PeerId,
     },
+    /// A non-relayed (direct) connection exists to `peer`. Emitted for every
+    /// established connection whose path does not go through a relay, so the
+    /// lobby can tell "the opponent is reachable directly" (LAN, port-forwarded,
+    /// or a hole-punched link) from "traffic is bouncing through the gateway".
+    ///
+    /// Gateways are direct too, so consumers must filter known gateway peers
+    /// before treating this as a player being directly reachable.
+    DirectConnected {
+        peer: PeerId,
+    },
     Error(String),
 }
 
@@ -384,9 +394,17 @@ async fn run_swarm(
                         let _ = event_tx.send(NetEvent::Listening(address));
                     }
                 }
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                SwarmEvent::ConnectionEstablished {
+                    peer_id, endpoint, ..
+                } => {
                     info!("Connected to {peer_id}");
                     let _ = event_tx.send(NetEvent::PeerConnected(peer_id));
+                    // A non-relayed path to `peer_id` means the punch went
+                    // through (or the peer was directly reachable all along):
+                    // report it so the game stops relying on the relay.
+                    if !endpoint.is_relayed() {
+                        let _ = event_tx.send(NetEvent::DirectConnected { peer: peer_id });
+                    }
                 }
                 SwarmEvent::ConnectionClosed { peer_id, .. } => {
                     // A connection being closed doesn't mean the peer is gone
@@ -575,4 +593,40 @@ pub fn is_circuit(addr: &Multiaddr) -> bool {
 /// so `crate::protocol::GATEWAY_AGENT_VERSION` stays reachable from the menu.
 pub(crate) fn is_gateway_agent(agent: &str) -> bool {
     agent.contains(GATEWAY_AGENT_VERSION)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libp2p::multiaddr::Protocol;
+
+    fn fixed_peer(marker: u8) -> PeerId {
+        let mut bytes = [0u8; 34];
+        bytes[0] = 0x00;
+        bytes[1] = 0x20;
+        bytes[2] = 0x08;
+        bytes[3] = 0x01;
+        bytes[4] = marker;
+        PeerId::from_bytes(&bytes).expect("valid identity prototype peer id")
+    }
+
+    #[test]
+    fn circuit_address_is_detected() {
+        let mut relayed = Multiaddr::empty();
+        relayed.push(Protocol::Ip4("203.0.113.10".parse().unwrap()));
+        relayed.push(Protocol::Tcp(4001));
+        relayed.push(Protocol::P2p(fixed_peer(0x11)));
+        relayed.push(Protocol::P2pCircuit);
+        relayed.push(Protocol::P2p(fixed_peer(0x22)));
+        assert!(is_circuit(&relayed));
+    }
+
+    #[test]
+    fn direct_address_is_not_a_circuit() {
+        let mut direct = Multiaddr::empty();
+        direct.push(Protocol::Ip4("192.168.1.50".parse().unwrap()));
+        direct.push(Protocol::Tcp(43321));
+        direct.push(Protocol::P2p(fixed_peer(0x33)));
+        assert!(!is_circuit(&direct));
+    }
 }

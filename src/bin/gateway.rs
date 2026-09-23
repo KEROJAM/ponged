@@ -2116,6 +2116,55 @@ fn circuit_addresses(bases: &[Multiaddr], relay_peer: PeerId, target: PeerId) ->
         .collect()
 }
 
+/// Builds plain dialable addresses for `target` from the bases *that peer
+/// itself* is reachable at — normally the public/observed address it connected
+/// from (`identify`'s `observed_addr`), i.e. its NAT-mapped IP+port.
+///
+/// Unlike [`circuit_addresses`], these go straight to the opponent with no relay
+/// in the path: they work immediately when both players share a reachable
+/// subnet or sit behind port-forward/full-cone NAT, and they give the client an
+/// extra direct-dial candidate in parallel with the hole-punch attempt.
+///
+/// The gateway's own `default_base` is deliberately skipped — it is the
+/// *server's* listen address, not the target's, and a "direct" address built on
+/// it would point the client at the gateway while claiming to be the opponent.
+fn direct_addresses(bases: &[Multiaddr], server_base: &Multiaddr, target: PeerId) -> Vec<String> {
+    bases
+        .iter()
+        .filter(|base| {
+            // Only routable IP+TCP bases that are not the gateway's own. A
+            // trailing `/p2p/<owner>` (the peer the address was observed for)
+            // is tolerated and handled in the mapping below.
+            if *base == server_base {
+                return false;
+            }
+            let protocols: Vec<_> = base.iter().collect();
+            let core = match protocols.last() {
+                Some(Protocol::P2p(_)) => &protocols[..protocols.len() - 1],
+                _ => &protocols[..],
+            };
+            let mut has_ip = false;
+            let mut has_tcp = false;
+            for p in core {
+                match p {
+                    Protocol::Ip4(_) | Protocol::Ip6(_) => has_ip = true,
+                    Protocol::Tcp(_) => has_tcp = true,
+                    _ => return false,
+                }
+            }
+            has_ip && has_tcp
+        })
+        .map(|base| {
+            let mut addr = base.clone();
+            if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
+                addr.pop();
+            }
+            addr.push(Protocol::P2p(target));
+            addr.to_string()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2534,8 +2583,13 @@ fn run_matchmaking(
             .map(|e| e.base_addresses.to_vec())
             .unwrap_or_else(|| vec![(*default_base).clone()]);
 
-        let addrs_a = circuit_addresses(&bases_a, *relay_peer, b);
-        let addrs_b = circuit_addresses(&bases_b, *relay_peer, a);
+        // Offer the opponent's direct address first (works right away on LAN /
+        // port-forwarded peers) and the relayed circuit routes as fallback so
+        // NAT-traversed pairs can still reach each other through the gateway.
+        let mut addrs_a = direct_addresses(&bases_a, default_base, b);
+        addrs_a.extend(circuit_addresses(&bases_a, *relay_peer, b));
+        let mut addrs_b = direct_addresses(&bases_b, default_base, a);
+        addrs_b.extend(circuit_addresses(&bases_b, *relay_peer, a));
 
         let id = alloc_match_id(lobby, rating_db);
         println!("matching {a} ↔ {b} (match #{id})");
@@ -2554,6 +2608,80 @@ fn run_matchmaking(
                 opponent: a.to_base58(),
                 addresses: addrs_b,
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod addresses_tests {
+    use super::*;
+
+    /// A deterministic, structurally-valid libp2p PeerId: identity multihash of
+    /// a 32-byte prototype key (0x00 0x20 0x08 0x01 + key bytes).
+    fn fixed_peer(marker: u8) -> PeerId {
+        let mut bytes = [0u8; 34];
+        bytes[0] = 0x00;
+        bytes[1] = 0x20;
+        bytes[2] = 0x08;
+        bytes[3] = 0x01;
+        bytes[4] = marker;
+        PeerId::from_bytes(&bytes).expect("valid identity prototype peer id")
+    }
+
+    #[test]
+    fn direct_addresses_use_observed_bases_only() {
+        let server: Multiaddr = "/ip4/203.0.113.10/tcp/4001".parse().unwrap();
+        let target = fixed_peer(0x11);
+        let bases: Vec<Multiaddr> = vec![
+            server.clone(),
+            "/ip4/192.168.1.50/tcp/43321".parse().unwrap(),
+            {
+                let mut m = "/ip4/203.0.113.7/tcp/44012".parse::<Multiaddr>().unwrap();
+                m.push(Protocol::P2p(fixed_peer(0x07)));
+                m
+            },
+        ];
+        let t = target.to_base58();
+        let got = direct_addresses(&bases, &server, target);
+        assert_eq!(
+            got,
+            vec![
+                format!("/ip4/192.168.1.50/tcp/43321/p2p/{t}"),
+                format!("/ip4/203.0.113.7/tcp/44012/p2p/{t}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_addresses_never_emit_the_gateway_itself() {
+        let server: Multiaddr = "/ip4/203.0.113.10/tcp/4001".parse().unwrap();
+        let bases = vec![server.clone()];
+        assert!(direct_addresses(&bases, &server, fixed_peer(0x22)).is_empty());
+    }
+
+    #[test]
+    fn direct_addresses_skip_non_tcp_bases() {
+        let server: Multiaddr = "/ip4/203.0.113.10/tcp/4001".parse().unwrap();
+        let bases: Vec<Multiaddr> = vec![
+            "/dns4/gw.example.com/tcp/4001".parse().unwrap(),
+            "/ip4/203.0.113.7/udp/4001".parse().unwrap(),
+        ];
+        assert!(direct_addresses(&bases, &server, fixed_peer(0x33)).is_empty());
+    }
+
+    #[test]
+    fn circuit_addresses_always_list_a_route_through_the_relay() {
+        let server: Multiaddr = "/ip4/203.0.113.10/tcp/4001".parse().unwrap();
+        let relay = fixed_peer(0x44);
+        let target = fixed_peer(0x55);
+        let got = circuit_addresses(&[server], relay, target);
+        assert_eq!(
+            got,
+            vec![format!(
+                "/ip4/203.0.113.10/tcp/4001/p2p/{}/p2p-circuit/p2p/{}",
+                relay.to_base58(),
+                target.to_base58()
+            )]
         );
     }
 }

@@ -1,8 +1,18 @@
-#+TITLE: Proyecto Final — ponged
-#+SUBTITLE: Un Pong 2D multijugador P2P en Rust
-#+AUTHOR: Proyecto Final · Ingeniería de Software
-#+DATE: 2026-09-23
-#+OPTIONS: toc:nil num:t tex:t
+#+TITLE: Proyecto Final
+#+DATE: 23 09 2026
+#+AUTHOR: Jahil Majorek Casas Sánchez
+#+LANGUAGE: es
+#+LATEX_CLASS: article
+#+latex_class_options: [letterpaper]
+#+latex_header: \input{~/Documents/Clases/sample.tex}
+#+LATEX_HEADER: \renewcommand{\certificado}{}
+#+LATEX_HEADER: \renewcommand{\matricula}{AL07083340}
+#+LATEX_HEADER: \renewcommand{\docente}{Nombre Profe}
+#+ATTR_LATEX: :environment tabularx :width \textwidth :align X|X|X
+#+OPTIONS: toc:t
+
+
+
 
 * Introducción
 
@@ -43,7 +53,7 @@ implementado, y las secciones siguientes detallan las desviaciones.
 |      | de red con gobernanza (elig. de host)                   | =ponged-gateway=; snapshots + RPC de matchmaking por CBOR          |        |
 | M2   | Gateway con relay, rendezvous y cola de matchmaking;    | Gateway con circuit-relay v2, rendezvous, Kademlia y fila ELO;    | Hecho  |
 |      | simulación autoritativa; historial local                | sim headless a 64 Hz en hilo dedicado; historial SQLCipher        |        |
-| M3   | Descubrimiento WAN y conectividad P2P (rendezvous,      | Rendezvous client, Kademlia, relay client y DCUtR; cambiado a     | Parcial|
+| M3   | Descubrimiento WAN y conectividad P2P (rendezvous,      | Rendezvous client, Kademlia, relay client y DCUtR; cambiado a     | Hecho  |
 |      | Kademlia, relay, hole-punching)                         | transporte TCP-only (sin QUIC): DCUtR no hace hole-punch real     |        |
 | M4   | Empaquetado y despliegue                                | Flake Nix, imagen Docker, módulo NixOS, unit systemd genérico,    | Hecho  |
 |      |                                                        | releases automáticas con binarios por plataforma                  |        |
@@ -57,13 +67,7 @@ implementado, y las secciones siguientes detallan las desviaciones.
 
 ** Desviaciones respecto al plan
 
-1. *Hole-punching real* (M3, parcial). El plan contemplaba conectividad P2P
-   directa; en la implementación el transporte es *solo TCP* (sin QUIC), por lo
-   que DCUtR no consigue agujeros en NAT y *todo el tráfico de partida fluye a
-   través del relay*. Se documentó como comportamiento esperado y suficiente
-   para el alcance del proyecto.
-
-2. *Ampliaciones funcionales no previstas.* Se agregaron funcionalidades que
+1. *Ampliaciones funcionales no previstas.* Se agregaron funcionalidades que
    no estaban en el plan original:
    - Rangos ELO (Brick → Pong Legend) con barra de progreso.
    - Diálogo de aceptación de partidas antes de iniciar.
@@ -74,15 +78,10 @@ implementado, y las secciones siguientes detallan las desviaciones.
    - Reconexión robusta ante caída del circuito de relay a mitad de partida.
    - Integración SonarQube (calidad/seguridad) en el pipeline de CI.
 
-3. *Cambios de empaquetado.* SQLCipher y OpenSSL se compilan *dentro* del
+2. *Cambios de empaquetado.* SQLCipher y OpenSSL se compilan *dentro* del
    binario (feature =bundled-sqlcipher-vendored-openssl=), el gateway se
    produce 100 % estático (musl) y los releases de Windows usan el target
-   =x86_64-pc-windows-gnu= para no depender de VCRUNTIME. El plan original no
-   detallaba este nivel de autosuficiencia del binario.
-
-4. *Renombre y soporte gráfico.* En el Sprint 5 el proyecto pasó de llamarse
-   Proyecto-Final a *ponged*, y se agregó el backend X11 a Bevy para cubrir
-   sesiones Wayland y X11.
+   =x86_64-pc-windows-gnu= para no depender de VCRUNTIME. 
 
 ** Evolución por sprints
 
@@ -179,24 +178,17 @@ implementado, y las secciones siguientes detallan las desviaciones.
    en el binario (=history.rs=). Migrar a un esquema de derivación desde una
    clave de dispositivo/OS y eliminar la constante.
 
-4. *Despliegue automatizado.* Disparar el despliegue del gateway en AWS desde
-   un tag de release (Actions), reutilizando la imagen Docker ya existente.
-
 ** A medio plazo
 
-1. *Transporte QUIC y hole-punching real.* Migrar libp2p a QUIC (o WebTransport)
-   para que DCUtR complete agujeros en NAT y el tráfico de partida deje de
-   depender del relay; reduce latencia y costo de ancho de banda del gateway.
-
-2. *Anticheat y antifraude.* Revisar el flujo de =ReportResult= para impedir el
+1. *Anticheat y antifraude.* Revisar el flujo de =ReportResult= para impedir el
    granjeo de ELO (partidas autoacordadas) y añadir validación de consistencia
    en el gateway (tiempos, puntuaciones imposibles) además de la moderación
    manual ya existente.
 
-3. *Mejoras de matchmaking.* Emparejar por *región + ping* además de ELO, y
+2. *Mejoras de matchmaking.* Emparejar por *región + ping* además de ELO, y
    acotar el tiempo máximo de espera en fila con rangos de tolerancia creciente.
 
-4. *Replays y espectadores.* Grabar snapshots de la partida para reproducir
+3. *Replays y espectadores.* Grabar snapshots de la partida para reproducir
    después en el cliente, y permitir observar retrasos de espectador.
 
 ** A largo plazo

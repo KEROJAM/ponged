@@ -98,6 +98,10 @@ pub struct ReconnectionState {
     /// Seconds accumulated since the last re-dial attempt, paced by
     /// [`REDIAL_EVERY_SECS`].
     pub redial_accum: f32,
+    /// True once a *direct* (hole-punched, LAN or port-forwarded) connection to
+    /// the current opponent exists. Direct links are preferred on re-dials and
+    /// stop the relay from being in the match path.
+    pub direct: bool,
 }
 
 /// Latest update information fetched from the GitHub API.
@@ -1816,6 +1820,10 @@ pub fn on_gateway_request(
                 .iter()
                 .filter_map(|addr| addr.parse::<Multiaddr>().ok())
                 .collect();
+            // (Re)start the direct-connection tracking for this opponent: the
+            // gateway hands out direct *and* circuit addresses; a hole punch
+            // may or may not land before the match starts.
+            reconn.direct = false;
             for addr in &reconn.addresses {
                 let _ = channels.commands.send(NetCommand::Dial(addr.clone()));
             }
@@ -1880,6 +1888,36 @@ pub fn on_rendezvous_discovered(ev: On<NetEvent>, peers: Res<Peers>, channels: R
             let _ = channels.commands.send(NetCommand::Dial(addr.clone()));
         }
     }
+}
+
+/// Learns we can reach a peer over a direct (non-relayed) path: a successful
+/// DCUtR hole punch, or simply a peer that was directly reachable (LAN /
+/// port-forward). Gateways are direct too, so they are ignored; only a peer we
+/// are actually about to play (or reconnecting to) marks the match as direct,
+/// which makes re-dials prefer the direct address and stops the relay from
+/// carrying the match traffic.
+pub fn on_direct_connected(
+    ev: On<NetEvent>,
+    gateway: Res<GatewayState>,
+    pre: Res<PreMatch>,
+    matched: Res<GatewayMatch>,
+    mut reconn: ResMut<ReconnectionState>,
+) {
+    let NetEvent::DirectConnected { peer } = ev.event() else {
+        return;
+    };
+    if gateway.known.contains(peer) || gateway.peer == Some(*peer) {
+        return;
+    }
+    let is_opponent = pre.opponent == Some(*peer)
+        || reconn.target == Some(*peer)
+        || matched.0 == Some(*peer);
+    if !is_opponent {
+        info!("Direct connection to {peer} (not an active opponent)");
+        return;
+    }
+    reconn.direct = true;
+    info!("Direct (hole-punched) connection established with opponent {peer}");
 }
 
 /// Re-queries the gateway's rendezvous server so newly arrived players (WAN)
@@ -1965,6 +2003,7 @@ pub fn on_game_request(
     mut names: ResMut<PeerNames>,
     mut pre: ResMut<PreMatch>,
     mut commands: Commands,
+    match_over: Res<crate::sim::MatchOver>,
 ) {
     let NetEvent::GameRequest { peer, request } = ev.event() else {
         return;
@@ -2016,8 +2055,16 @@ pub fn on_game_request(
         }
         GameRequest::MatchAbort => {
             info!("{peer} ended the match; back to menu");
-            pre.previous = Some(*peer);
-            opponent.0 = None;
+            // A finished match must still be recorded and reported on exit
+            // (`record_match` reads `Opponent`). Only discard the pairing when
+            // the match had no winner yet — otherwise the side that *receives*
+            // the abort (the one who pressed ESC second) would lose its match
+            // from the local history and never confirm the report at the
+            // gateway, leaving the match stuck "pending" in moderation.
+            if *state != AppState::Playing || !match_over.0 {
+                pre.previous = Some(*peer);
+                opponent.0 = None;
+            }
             pending.0 = None;
             if *state == AppState::Playing {
                 next.set(AppState::Menu);
@@ -2066,6 +2113,7 @@ pub fn on_enter_playing(
     reconn.countdown = None;
     reconn.target = None;
     reconn.redial_accum = 0.0;
+    reconn.direct = false;
     sim::set_peer_link_up(true);
     if gateway.queued
         && let Some(peer) = gateway.peer
@@ -2103,6 +2151,7 @@ pub fn on_exit_playing(
     // The next match gets its own addresses from its own `MatchFound` (or from
     // the relay reconstruction fallback), so don't carry the last opponent's.
     reconn.addresses.clear();
+    reconn.direct = false;
     // A queued replacement match (Playing → Menu → Playing) is on its way:
     // keep the new opponent and the pending marker.
     if pending.0.is_some() {
@@ -3446,6 +3495,44 @@ pub fn update_node_graph(
     }
 }
 
+// --- Hole-punch driving ---------------------------------------------------
+
+/// While the pre-match confirmation dialog is open, re-dial the opponent's
+/// direct and circuit addresses on a short interval. Each fresh inbound relayed
+/// circuit to us makes libp2p's DCUtR attempt a hole punch, so re-dialing gives
+/// a missed or raced punch another chance before the match starts; the direct
+/// addresses (now included in `MatchFound`) surface an already-reachable LAN /
+/// port-forwarded link immediately, without waiting for the relay at all.
+/// Stops once [`ReconnectionState::direct`] reports a direct link exists.
+pub fn update_prematch_punch(
+    time: Res<Time>,
+    pre: Res<PreMatch>,
+    gateway: Res<GatewayState>,
+    reconn: Res<ReconnectionState>,
+    channels: Res<NetChannels>,
+    mut accum: Local<f32>,
+) {
+    let Some(opponent) = pre.opponent else {
+        *accum = 0.0;
+        return;
+    };
+    if reconn.direct {
+        return;
+    }
+    *accum += time.delta_secs();
+    if *accum < REDIAL_EVERY_SECS {
+        return;
+    }
+    *accum = 0.0;
+    info!("Re-dialing opponent {opponent} to (re)trigger the hole punch");
+    for addr in &reconn.addresses {
+        let _ = channels.commands.send(NetCommand::Dial(addr.clone()));
+    }
+    if let Some(circuit_addr) = opponent_relay_addr(&gateway, &opponent) {
+        let _ = channels.commands.send(NetCommand::Dial(circuit_addr));
+    }
+}
+
 // --- Reconnection system ---------------------------------------------------
 
 /// Handles reconnection attempts when a peer disconnects during a match. Keeps
@@ -3513,11 +3600,22 @@ pub fn update_reconnection(
     reconn.redial_accum = 0.0;
 
     info!("Re-dialing opponent {target}");
-    for addr in &reconn.addresses {
-        let _ = channels.commands.send(NetCommand::Dial(addr.clone()));
-    }
-    if let Some(circuit_addr) = opponent_relay_addr(&gateway, &target) {
-        let _ = channels.commands.send(NetCommand::Dial(circuit_addr));
+    if reconn.direct {
+        // The hole punch landed: keep the match on the direct link and only
+        // re-dial non-relayed addresses, instead of dragging it back through
+        // the gateway relay every couple of seconds.
+        for addr in &reconn.addresses {
+            if !crate::networking::is_circuit(addr) {
+                let _ = channels.commands.send(NetCommand::Dial(addr.clone()));
+            }
+        }
+    } else {
+        for addr in &reconn.addresses {
+            let _ = channels.commands.send(NetCommand::Dial(addr.clone()));
+        }
+        if let Some(circuit_addr) = opponent_relay_addr(&gateway, &target) {
+            let _ = channels.commands.send(NetCommand::Dial(circuit_addr));
+        }
     }
 
     // The gateway/relay link may have been the thing that dropped. Re-dial it

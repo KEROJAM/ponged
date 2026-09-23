@@ -602,6 +602,10 @@ fn main() {
         )
         .add_systems(
             Update,
+            menu::update_prematch_punch.run_if(in_state(AppState::Menu)),
+        )
+        .add_systems(
+            Update,
             menu::update_prematch.run_if(in_state(AppState::Menu)),
         )
         .add_systems(
@@ -712,6 +716,7 @@ fn main() {
         .add_observer(menu::on_gateway_response)
         .add_observer(menu::on_gateway_request)
         .add_observer(menu::on_rendezvous_discovered)
+        .add_observer(menu::on_direct_connected)
         .add_observer(menu::on_game_request)
         .add_observer(menu::on_chat_message)
         .add_observer(menu::on_peer_disconnected)
