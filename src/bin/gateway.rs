@@ -98,7 +98,8 @@ ponged-gateway — matchmaking + relay gateway for the P2P pong game
 
 USAGE:
     ponged-gateway [OPTIONS]
-    ponged-gateway --add-moderator <user>
+    ponged-gateway --add-moderator <user> [--role <admin|user>]
+    ponged-gateway --set-role <user> <admin|user>
     ponged-gateway --remove-moderator <user>
 
 OPTIONS:
@@ -110,7 +111,11 @@ OPTIONS:
     --http <port>          HTTP monitor + moderation page port (0 disables)
                            [default: 8080]
     --add-moderator <user> Create (or reset the password of) a moderator
-                           account; the password is read from stdin, then exits
+                           account; the password is read from stdin, then exits.
+                           The account role defaults to 'user'
+    --role <admin|user>    Role for the account created with --add-moderator
+                           [default: user]
+    --set-role <user> <admin|user>  Change a moderator's role, then exits
     --remove-moderator <user>  Delete a moderator account, then exits
     --help                 Print this help
 ";
@@ -226,6 +231,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut http_port = DEFAULT_HTTP_PORT;
     let mut add_mod: Option<String> = None;
     let mut remove_mod: Option<String> = None;
+    let mut add_mod_role: Option<ModRole> = None;
+    let mut set_role: Option<(String, ModRole)> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -235,6 +242,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "--db" => db_path = args.next().ok_or("--db needs a value")?.into(),
             "--key" => key_path = args.next().ok_or("--key needs a value")?.into(),
             "--http" => http_port = args.next().ok_or("--http needs a value")?.parse()?,
+            "--role" => {
+                let role = args.next().ok_or("--role needs a value")?;
+                add_mod_role = Some(ModRole::parse(&role).ok_or_else(|| {
+                    format!("rol inválido '{role}' (usa 'admin' o 'user')\n\n{USAGE}")
+                })?);
+            }
+            "--set-role" => {
+                let user = args.next().ok_or("--set-role needs a username")?;
+                let role = args.next().ok_or("--set-role needs a role (admin|user)")?;
+                set_role = Some((
+                    user,
+                    ModRole::parse(&role).ok_or_else(|| {
+                        format!("rol inválido '{role}' (usa 'admin' o 'user')\n\n{USAGE}")
+                    })?,
+                ));
+            }
             "--add-moderator" => add_mod = Some(args.next().ok_or("--add-moderator needs a value")?),
             "--remove-moderator" => {
                 remove_mod = Some(args.next().ok_or("--remove-moderator needs a value")?)
@@ -245,6 +268,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             other => return Err(format!("unknown argument '{other}'\n\n{USAGE}").into()),
         }
+    }
+
+    if add_mod_role.is_some() && add_mod.is_none() {
+        return Err(format!("--role solo se puede usar junto con --add-moderator\n\n{USAGE}").into());
     }
 
     let keypair = load_or_create_key(&key_path)?;
@@ -262,9 +289,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // One-shot moderator administration: create/delete an account and exit.
     if let Some(user) = add_mod {
         let password = read_password(&user)?;
-        set_moderator(&rating_db, &user, &password)?;
+        let role = add_mod_role.unwrap_or(ModRole::User);
+        set_moderator(&rating_db, &user, &password, role)?;
         let total = moderator_count(&rating_db);
-        println!("moderador '{user}' guardado ({total} en total)");
+        println!("moderador '{user}' guardado (rol: {role}, {total} en total)");
+        return Ok(());
+    }
+    if let Some((user, role)) = set_role {
+        match update_moderator_role(&rating_db, &user, role)? {
+            true => println!("rol del moderador '{user}' actualizado a {role}"),
+            false => eprintln!("no existe ningún moderador llamado '{user}'"),
+        }
         return Ok(());
     }
     if let Some(user) = remove_mod {
@@ -520,9 +555,43 @@ fn open_ratings(path: &PathBuf) -> Result<Connection, Box<dyn std::error::Error 
 // Moderator accounts (who may log into the HTTP moderation page).
 // ---------------------------------------------------------------------------
 
+/// What a moderator account may do. `admin` adds account management (creating,
+/// promoting, demoting, deleting other moderators); `user` can still view the
+/// monitor and revoke/correct matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModRole {
+    Admin,
+    User,
+}
+
+impl ModRole {
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "admin" => Some(ModRole::Admin),
+            "user" => Some(ModRole::User),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ModRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ModRole::Admin => "admin",
+            ModRole::User => "user",
+        })
+    }
+}
+
 /// Creates a moderator account (or resets its password). The password is
-/// never stored: only a salted, iterated SHA-256 hash.
-fn set_moderator(conn: &Connection, username: &str, password: &str) -> Result<(), String> {
+/// never stored: only a salted, iterated SHA-256 hash. A reset keeps the
+/// given role (use `--role`/the admin page to promote or demote).
+fn set_moderator(
+    conn: &Connection,
+    username: &str,
+    password: &str,
+    role: ModRole,
+) -> Result<(), String> {
     let user = username.trim().to_ascii_lowercase();
     if user.is_empty() {
         return Err("el nombre de moderador no puede estar vacío".into());
@@ -534,11 +603,11 @@ fn set_moderator(conn: &Connection, username: &str, password: &str) -> Result<()
     rand::rng().fill(&mut salt);
     let pass_hash = hash_password(&salt, password);
     conn.execute(
-        "INSERT INTO moderators (username, salt, pass_hash, created_at)
-         VALUES (?1, ?2, ?3, datetime('now'))
+        "INSERT INTO moderators (username, salt, pass_hash, role, created_at)
+         VALUES (?1, ?2, ?3, ?4, datetime('now'))
          ON CONFLICT(username) DO UPDATE
-           SET salt = excluded.salt, pass_hash = excluded.pass_hash",
-        params![user, salt.as_slice(), pass_hash.as_slice()],
+           SET salt = excluded.salt, pass_hash = excluded.pass_hash, role = excluded.role",
+        params![user, salt.as_slice(), pass_hash.as_slice(), role.to_string()],
     )
     .map_err(|e| format!("no se pudo guardar el moderador: {e}"))?;
     Ok(())
@@ -575,6 +644,44 @@ fn verify_moderator(conn: &Connection, username: &str, password: &str) -> bool {
 fn moderator_count(conn: &Connection) -> usize {
     conn.query_row("SELECT COUNT(*) FROM moderators", [], |row| row.get(0))
         .unwrap_or(0)
+}
+
+/// The role stored for a moderator (defaults to `user` for legacy rows).
+fn moderator_role(conn: &Connection, username: &str) -> Option<ModRole> {
+    let user = username.trim().to_ascii_lowercase();
+    let role: String = conn
+        .query_row(
+            "SELECT role FROM moderators WHERE username = ?1",
+            params![user],
+            |row| row.get(0),
+        )
+        .ok()?;
+    ModRole::parse(&role)
+}
+
+/// Changes a moderator's role (promotion/demotion). Returns `false` if the
+/// username does not exist.
+fn update_moderator_role(conn: &Connection, username: &str, role: ModRole) -> Result<bool, String> {
+    let user = username.trim().to_ascii_lowercase();
+    let updated = conn
+        .execute(
+            "UPDATE moderators SET role = ?1 WHERE username = ?2",
+            params![role.to_string(), user],
+        )
+        .map_err(|e| format!("no se pudo actualizar el rol: {e}"))?;
+    Ok(updated > 0)
+}
+
+/// All moderator accounts (username, role) for the admin section of the page.
+fn list_moderators(conn: &Connection) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare("SELECT username, role FROM moderators ORDER BY role, username")
+        .map_err(|e| format!("no se pudieron listar los moderadores: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| format!("no se pudieron listar los moderadores: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("no se pudieron listar los moderadores: {e}"))
 }
 
 /// Reads the new moderator's password from stdin (kept out of the command
@@ -651,6 +758,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             username   TEXT    NOT NULL UNIQUE,
             salt       BLOB    NOT NULL,
             pass_hash  BLOB    NOT NULL,
+            role       TEXT    NOT NULL DEFAULT 'user',
             created_at TEXT    NOT NULL
         );",
     )?;
@@ -674,6 +782,18 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         .is_some();
     if !has_edited {
         conn.execute("ALTER TABLE matches ADD COLUMN edited_at TEXT", [])?;
+    }
+    // And before moderator roles existed (accounts are 'user' until promoted).
+    let has_role = conn
+        .prepare("SELECT 1 FROM pragma_table_info('moderators') WHERE name = 'role'")?
+        .query_row([], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if !has_role {
+        conn.execute(
+            "ALTER TABLE moderators ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -1457,10 +1577,12 @@ fn list_matches_json(conn: &Connection) -> String {
 // moderation. Everything except `/login` requires a valid moderator session.
 // ---------------------------------------------------------------------------
 
-/// In-memory moderator sessions (token → username + sliding expiry). Session
-/// tokens are random and kept only in RAM, so a restart logs everyone out.
+/// In-memory moderator sessions (token → username + role + sliding expiry).
+/// Session tokens are random and kept only in RAM, so a restart logs everyone
+/// out. The role is snapshotted at login: a promotion/demotion takes effect
+/// on the moderator's next sign-in.
 struct Auth {
-    sessions: Mutex<HashMap<String, (String, Instant)>>,
+    sessions: Mutex<HashMap<String, (String, ModRole, Instant)>>,
 }
 
 impl Auth {
@@ -1480,25 +1602,36 @@ impl Auth {
         if !verify_moderator(&conn, &user, password) {
             return None;
         }
+        let role = moderator_role(&conn, &user).unwrap_or(ModRole::User);
         let token = session_token();
         self.sessions
             .lock()
             .unwrap()
-            .insert(token.clone(), (user, Instant::now()));
+            .insert(token.clone(), (user, role, Instant::now()));
         Some(token)
+    }
+
+    /// The live session (username + role) for `token`, if any (sliding TTL).
+    fn session(&self, token: Option<String>) -> Option<(String, ModRole)> {
+        let token = token?;
+        let mut sessions = self.sessions.lock().unwrap();
+        let entry = sessions.get_mut(&token)?;
+        if entry.2.elapsed() > Duration::from_secs(SESSION_MAX_AGE_SECS) {
+            sessions.remove(&token);
+            return None;
+        }
+        entry.2 = Instant::now();
+        Some((entry.0.clone(), entry.1))
     }
 
     /// The moderator's username if `token` is a live session (sliding TTL).
     fn who(&self, token: Option<String>) -> Option<String> {
-        let token = token?;
-        let mut sessions = self.sessions.lock().unwrap();
-        let entry = sessions.get_mut(&token)?;
-        if entry.1.elapsed() > Duration::from_secs(SESSION_MAX_AGE_SECS) {
-            sessions.remove(&token);
-            return None;
-        }
-        entry.1 = Instant::now();
-        Some(entry.0.clone())
+        self.session(token).map(|(user, _)| user)
+    }
+
+    /// Whether the session belongs to an `admin`-role moderator.
+    fn is_admin(&self, token: Option<String>) -> bool {
+        matches!(self.session(token), Some((_, ModRole::Admin)))
     }
 
     fn logout(&self, token: Option<String>) {
@@ -1742,8 +1875,10 @@ async fn route_request(
                 None => HttpResp::redirect("/login?error=1"),
             }
         }
-        ("GET", "/") | ("GET", "/index.html") => match auth.who(cookie) {
-            Some(user) => HttpResp::html(200, monitor_page(&user)),
+        ("GET", "/") | ("GET", "/index.html") => match auth.session(cookie) {
+            Some((user, role)) => {
+                HttpResp::html(200, monitor_page(&user, role == ModRole::Admin))
+            }
             None => HttpResp::redirect("/login"),
         },
         ("GET", "/api/matches") => {
@@ -1752,6 +1887,76 @@ async fn route_request(
             }
             let (code, body) = http_ask(tx, HttpCmd::List).await;
             HttpResp::json(code, body)
+        }
+        ("GET", "/api/moderators") => {
+            if !auth.is_admin(cookie) {
+                return HttpResp::json(403, err_json("se requiere rol admin"));
+            }
+            let body = match moderator_list_json(db_path) {
+                Ok(body) => body,
+                Err(e) => return HttpResp::json(500, err_json(e)),
+            };
+            HttpResp::json(200, body)
+        }
+        ("POST", "/api/moderators") => {
+            if !auth.is_admin(cookie) {
+                return HttpResp::json(403, err_json("se requiere rol admin"));
+            }
+            let username = form_field(body, "username").unwrap_or_default();
+            let password = form_field(body, "password").unwrap_or_default();
+            let role = form_field(body, "role")
+                .as_deref()
+                .and_then(ModRole::parse)
+                .unwrap_or(ModRole::User);
+            match add_moderator_http(db_path, &username, &password, role) {
+                Ok(()) => HttpResp::json(
+                    200,
+                    json!({ "ok": true, "message": format!("moderador '{username}' guardado") })
+                        .to_string(),
+                ),
+                Err(e) => HttpResp::json(400, err_json(e)),
+            }
+        }
+        ("POST", _) if mod_user_role_path(path).is_some() => {
+            if !auth.is_admin(cookie) {
+                return HttpResp::json(403, err_json("se requiere rol admin"));
+            }
+            let user = mod_user_role_path(path).unwrap();
+            let Some(role) = form_field(body, "role").as_deref().and_then(ModRole::parse) else {
+                return HttpResp::json(400, err_json("campo 'role' inválido (admin|user)"));
+            };
+            let conn = match db_open(db_path) {
+                Ok(c) => c,
+                Err(e) => return HttpResp::json(500, err_json(e)),
+            };
+            match update_moderator_role(&conn, &user, role) {
+                Ok(true) => HttpResp::json(
+                    200,
+                    json!({ "ok": true, "message": format!("rol de '{user}' actualizado a {role}") })
+                        .to_string(),
+                ),
+                Ok(false) => HttpResp::json(404, err_json(format!("no existe '{user}'"))),
+                Err(e) => HttpResp::json(500, err_json(e)),
+            }
+        }
+        ("POST", _) if mod_user_delete_path(path).is_some() => {
+            if !auth.is_admin(cookie) {
+                return HttpResp::json(403, err_json("se requiere rol admin"));
+            }
+            let user = mod_user_delete_path(path).unwrap();
+            let conn = match db_open(db_path) {
+                Ok(c) => c,
+                Err(e) => return HttpResp::json(500, err_json(e)),
+            };
+            match remove_moderator(&conn, &user) {
+                Ok(true) => HttpResp::json(
+                    200,
+                    json!({ "ok": true, "message": format!("moderador '{user}' eliminado") })
+                        .to_string(),
+                ),
+                Ok(false) => HttpResp::json(404, err_json(format!("no existe '{user}'"))),
+                Err(e) => HttpResp::json(500, err_json(e)),
+            }
         }
         ("POST", _) => {
             if auth.who(cookie).is_none() {
@@ -1837,6 +2042,51 @@ fn score_path(path: &str) -> Option<u64> {
     id.parse().ok()
 }
 
+/// `/api/moderators/<user>/role` → the (url-decoded) username.
+fn mod_user_role_path(path: &str) -> Option<String> {
+    const PREFIX: &str = "/api/moderators/";
+    const SUFFIX: &str = "/role";
+    let rest = path.strip_prefix(PREFIX)?;
+    Some(url_decode(rest.strip_suffix(SUFFIX)?))
+}
+
+/// `/api/moderators/<user>/delete` → the (url-decoded) username.
+fn mod_user_delete_path(path: &str) -> Option<String> {
+    const PREFIX: &str = "/api/moderators/";
+    const SUFFIX: &str = "/delete";
+    let rest = path.strip_prefix(PREFIX)?;
+    Some(url_decode(rest.strip_suffix(SUFFIX)?))
+}
+
+/// Opens the ratings DB for a short admin operation with a busy timeout (the
+/// main loop may be mid-write on the same file).
+fn db_open(path: &Path) -> Result<Connection, String> {
+    let conn =
+        Connection::open(path).map_err(|e| format!("no se pudo abrir la base de datos: {e}"))?;
+    let _ = conn.busy_timeout(Duration::from_secs(5));
+    Ok(conn)
+}
+
+/// Admin HTTP helper: create or reset a moderator account with a given role.
+fn add_moderator_http(
+    db_path: &Path,
+    username: &str,
+    password: &str,
+    role: ModRole,
+) -> Result<(), String> {
+    set_moderator(&db_open(db_path)?, username, password, role)
+}
+
+/// Admin HTTP helper: the moderator table as a JSON array.
+fn moderator_list_json(db_path: &Path) -> Result<String, String> {
+    let moderators = list_moderators(&db_open(db_path)?)?;
+    let rows: Vec<_> = moderators
+        .into_iter()
+        .map(|(username, role)| json!({ "username": username, "role": role }))
+        .collect();
+    Ok(json!({ "ok": true, "moderators": rows }).to_string())
+}
+
 fn err_json(msg: impl Into<String>) -> String {
     json!({ "ok": false, "error": msg.into() }).to_string()
 }
@@ -1895,6 +2145,7 @@ const MONITOR_HTML: &str = r#"<!doctype html>
   <p class="mod">%MODERADOR% · <a href="/logout">salir</a></p>
 </header>
 <main>
+  %ADMIN_SECTION%
   <div class="stats">
     <div class="stat"><b id="stTotal">–</b><span>partidas</span></div>
     <div class="stat"><b id="stPlayed">–</b><span>jugadas</span></div>
@@ -2023,17 +2274,112 @@ async function editScore(id) {
   refresh();
 }
 
+function modRow(m) {
+  const u = esc(m.username);
+  const admin = m.role === 'admin';
+  return '<tr data-user="' + u + '">'
+    + '<td>' + u + '</td>'
+    + '<td><select class="roleSel"><option value="user"' + (admin ? '' : ' selected') + '>user</option>'
+    + '<option value="admin"' + (admin ? ' selected' : '') + '>admin</option></select></td>'
+    + '<td><button class="setRole">Guardar rol</button> '
+    + '<button class="ghost delMod">Eliminar</button></td>'
+    + '</tr>';
+}
+
+async function loadMods() {
+  const tb = document.getElementById('modRows');
+  if (!tb) return;
+  const { ok, body } = await api('/api/moderators');
+  if (!ok) return;
+  tb.innerHTML = (body.moderators || []).map(modRow).join('');
+  tb.querySelectorAll('.setRole').forEach(btn => btn.onclick = () => setRole(btn));
+  tb.querySelectorAll('.delMod').forEach(btn => btn.onclick = () => delMod(btn));
+}
+
+async function setRole(btn) {
+  const tr = btn.closest('tr');
+  const fd = new URLSearchParams();
+  fd.append('role', tr.querySelector('.roleSel').value);
+  const r = await fetch('/api/moderators/' + encodeURIComponent(tr.dataset.user) + '/role', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: fd.toString()
+  });
+  if (r.status === 401 || r.status === 403) { location.href = '/login'; return; }
+  const body = await r.json().catch(() => ({}));
+  if (r.ok) toast(body.message || 'Rol actualizado'); else toast('Error: ' + (body.error || '?'));
+  loadMods();
+}
+
+async function delMod(btn) {
+  btn.disabled = true;
+  const r = await fetch('/api/moderators/' + encodeURIComponent(btn.closest('tr').dataset.user) + '/delete', {
+    method: 'POST'
+  });
+  if (r.status === 401 || r.status === 403) { location.href = '/login'; return; }
+  const body = await r.json().catch(() => ({}));
+  if (r.ok) toast(body.message || 'Cuenta eliminada'); else toast('Error: ' + (body.error || '?'));
+  loadMods();
+}
+
+async function addMod(ev) {
+  ev.preventDefault();
+  const fd = new URLSearchParams(new FormData(ev.target));
+  const r = await fetch('/api/moderators', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: fd.toString()
+  });
+  if (r.status === 401 || r.status === 403) { location.href = '/login'; return; }
+  const body = await r.json().catch(() => ({}));
+  if (r.ok) {
+    toast(body.message || 'Cuenta creada');
+    ev.target.reset();
+  } else {
+    toast('Error: ' + (body.error || '?'));
+  }
+  loadMods();
+}
+
 refresh();
 setInterval(refresh, 5000);
+loadMods();
 </script>
 </body>
 </html>
 "#;
 
-/// The monitor page, personalized with the logged-in moderator's username
-/// (injected at a placeholder so the rest stays one static blob).
-fn monitor_page(moderator: &str) -> String {
-    MONITOR_HTML.replace("%MODERADOR%", moderator)
+/// Admin-only section injected into the monitor page (`admin` role) — lets an
+/// admin create/reset accounts, promote/demote and delete moderators.
+const ADMIN_SECTION: &str = r#"<section>
+  <h2 style="font-size:14px; margin:0 0 8px; text-transform:uppercase; letter-spacing:1px;">Cuentas de moderador</h2>
+  <form onsubmit="return addMod(event)" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;" autocomplete="off">
+    <input name="username" placeholder="usuario" required style="background:#fff;border:1px solid #000;padding:7px 10px;font-size:12px;">
+    <input name="password" type="password" placeholder="contraseña" required style="background:#fff;border:1px solid #000;padding:7px 10px;font-size:12px;">
+    <select name="role" style="background:#fff;border:1px solid #000;padding:7px;font-size:12px;">
+      <option value="user">user</option><option value="admin">admin</option>
+    </select>
+    <button type="submit">Crear / resetear cuenta</button>
+  </form>
+  <table>
+    <thead><tr><th>Usuario</th><th>Rol</th><th></th></tr></thead>
+    <tbody id="modRows"></tbody>
+  </table>
+  <p class="sub" style="margin-top:8px;">user: revoca y corrige marcadores · admin: además gestiona cuentas de moderador.</p>
+</section>"#;
+
+/// The monitor page, personalized with the logged-in moderator's username and
+/// role (injected at placeholders so the rest stays one static blob).
+fn monitor_page(moderator: &str, is_admin: bool) -> String {
+    let admin_section = if is_admin { ADMIN_SECTION } else { "" };
+    let label = if is_admin {
+        format!("{moderator} · <b>admin</b>")
+    } else {
+        format!("{moderator} · user")
+    };
+    MONITOR_HTML
+        .replace("%MODERADOR%", &label)
+        .replace("%ADMIN_SECTION%", admin_section)
 }
 
 /// Login form shown instead of the monitor page until a moderator signs in.
@@ -2083,7 +2429,9 @@ const LOGIN_HTML: &str = r#"<!doctype html>
     <label><span>Contraseña</span><input type="password" name="password" required autocomplete="current-password"></label>
     <button>Entrar</button>
   </form>
-  <p class="foot">Las cuentas de moderador se crean en el gateway con <code>--add-moderator &lt;usuario&gt;</code>.</p>
+  <p class="foot">Las cuentas de moderador se crean en el gateway con
+     <code>--add-moderator &lt;usuario&gt; [--role admin|user]</code> (rol por
+     defecto: user).</p>
 </main>
 </body>
 </html>
@@ -2184,7 +2532,7 @@ mod tests {
     #[test]
     fn moderator_password_roundtrip() {
         let conn = tmp_db();
-        set_moderator(&conn, "ALicia", "supersecret").unwrap();
+        set_moderator(&conn, "ALicia", "supersecret", ModRole::Admin).unwrap();
         // Usernames are normalized; the right password verifies.
         assert!(verify_moderator(&conn, "alicia", "supersecret"));
         assert!(verify_moderator(&conn, "ALICIA", "supersecret"));
@@ -2193,7 +2541,7 @@ mod tests {
         assert!(!verify_moderator(&conn, "bob", "supersecret"));
         assert_eq!(moderator_count(&conn), 1);
         // Resetting the password keeps a single account.
-        set_moderator(&conn, "alicia", "nueva").unwrap();
+        set_moderator(&conn, "alicia", "nueva", ModRole::Admin).unwrap();
         assert!(verify_moderator(&conn, "alicia", "nueva"));
         assert!(!verify_moderator(&conn, "alicia", "supersecret"));
         assert_eq!(moderator_count(&conn), 1);
@@ -2201,6 +2549,106 @@ mod tests {
         assert!(remove_moderator(&conn, "alicia").unwrap());
         assert!(!verify_moderator(&conn, "alicia", "nueva"));
         assert_eq!(moderator_count(&conn), 0);
+    }
+
+    #[test]
+    fn moderator_roles_roundtrip() {
+        let conn = tmp_db();
+        // New accounts default to 'user' unless a role is given.
+        set_moderator(&conn, "user", "u-pass", ModRole::User).unwrap();
+        set_moderator(&conn, "boss", "b-pass", ModRole::Admin).unwrap();
+        assert_eq!(moderator_role(&conn, "user"), Some(ModRole::User));
+        assert_eq!(moderator_role(&conn, "boss"), Some(ModRole::Admin));
+        assert_eq!(moderator_role(&conn, "ghost"), None);
+        // A role change round-trips through the DB.
+        assert!(update_moderator_role(&conn, "user", ModRole::Admin).unwrap());
+        assert_eq!(moderator_role(&conn, "user"), Some(ModRole::Admin));
+        assert!(update_moderator_role(&conn, "user", ModRole::User).unwrap());
+        assert!(!update_moderator_role(&conn, "ghost", ModRole::Admin).unwrap());
+        // list_moderators reports both accounts with their roles.
+        let list = list_moderators(&conn).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|(u, r)| u == "user" && r == "user"));
+        assert!(list.iter().any(|(u, r)| u == "boss" && r == "admin"));
+        // ModRole::parse normalizes case; unknown names are rejected.
+        assert_eq!(ModRole::parse("  ADMIN "), Some(ModRole::Admin));
+        assert_eq!(ModRole::parse("root"), None);
+    }
+
+    #[test]
+    fn role_migration_adds_default_column() {
+        // A database created before roles existed has no 'role' column; the
+        // migration in init_schema adds it with the 'user' default so old
+        // accounts stay able to log in (as plain user) and the admin UI works.
+        let path = std::env::temp_dir().join(format!(
+            "pong-test-legacy-{}.sqlite",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE moderators (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                salt BLOB NOT NULL,
+                pass_hash BLOB NOT NULL,
+                created_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        let salt = [0xabu8; 16];
+        conn.execute(
+            "INSERT INTO moderators (username, salt, pass_hash, created_at)
+             VALUES ('trad', ?1, ?2, datetime('now'))",
+            params![salt.as_slice(), [0x42u8; 32].as_slice()],
+        )
+        .unwrap();
+        // The pragma introspection used here must work from the public helper.
+        let has_role_before: usize = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('moderators') WHERE name = 'role'")
+            .unwrap()
+            .query_row([], |r| r.get(0))
+            .unwrap();
+        assert_eq!(has_role_before, 0);
+        init_schema(&conn).unwrap();
+        let has_role_after: usize = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('moderators') WHERE name = 'role'")
+            .unwrap()
+            .query_row([], |r| r.get(0))
+            .unwrap();
+        assert_eq!(has_role_after, 1);
+        assert_eq!(moderator_role(&conn, "trad"), Some(ModRole::User));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn auth_session_carries_role() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("pong-test-sess-{nonce}.sqlite"));
+        {
+            let conn = Connection::open(&path).unwrap();
+            init_schema(&conn).unwrap();
+            set_moderator(&conn, "admin", "pass-admin", ModRole::Admin).unwrap();
+            set_moderator(&conn, "mod", "pass-mod", ModRole::User).unwrap();
+        }
+        let auth = Auth::new();
+        let token_admin = auth.login(&path, "admin", "pass-admin").unwrap();
+        let token_user = auth.login(&path, "mod", "pass-mod").unwrap();
+        // Wrong credentials produce no session.
+        assert!(auth.login(&path, "admin", "nope").is_none());
+        // The session remembers the account's role.
+        assert_eq!(auth.session(Some(token_admin.clone())), Some(("admin".into(), ModRole::Admin)));
+        assert_eq!(auth.session(Some(token_user.clone())), Some(("mod".into(), ModRole::User)));
+        assert!(auth.is_admin(Some(token_admin.clone())));
+        assert!(!auth.is_admin(Some(token_user.clone())));
+        assert_eq!(auth.who(Some(token_user.clone())), Some("mod".into()));
+        assert!(auth.who(Some("bogus".into())).is_none());
+        auth.logout(Some(token_admin.clone()));
+        assert!(auth.session(Some(token_admin)).is_none());
+        assert!(auth.session(Some(token_user)).is_some());
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -2228,6 +2676,24 @@ mod tests {
         assert_eq!(cookie_token("other=1; pong_mod=abc123; x=2").as_deref(), Some("abc123"));
         assert_eq!(cookie_token("pong_mod=").as_deref(), Some(""));
         assert_eq!(cookie_token("nomod=1"), None);
+    }
+
+    #[test]
+    fn moderator_http_path_parsing() {
+        assert_eq!(
+            mod_user_role_path("/api/moderators/alice%20x/role").as_deref(),
+            Some("alice x")
+        );
+        assert_eq!(mod_user_role_path("/api/moderators/alice/delete"), None);
+        assert_eq!(
+            mod_user_delete_path("/api/moderators/alice/delete").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(mod_user_delete_path("/api/moderators/alice/role"), None);
+        assert_eq!(score_path("/api/matches/42/score"), Some(42));
+        assert_eq!(score_path("/api/matches/42/revoke"), None);
+        assert_eq!(revoke_id("/api/matches/42/revoke"), Some(42));
+        assert_eq!(revoke_id("/api/matches/42/score"), None);
     }
 
     #[test]

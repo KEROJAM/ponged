@@ -1,0 +1,105 @@
+name: Seguridad (OWASP ZAP)
+
+# Escaneo de seguridad del gateway HTTP de moderación con OWASP ZAP. El
+# gateway se levanta con una base de datos SQLite efímera y se le hace un
+# baseline scan (XSS, SQLi, headers, etc.) contra /login y la API de
+# moderación desde un contenedor de ZAP en la red del host. El informe HTML
+# + JSON se publica como artefacto y el job falla si hay alertas de riesgo
+# High (los endpoints autenticados devuelven 401/403 al escáner).
+#
+# Reproducción local:
+#   echo "pass" | ./target/debug/ponged-gateway --db /tmp/gw.sqlite \
+#     --add-moderator zap --role admin
+#   ./target/debug/ponged-gateway --db /tmp/gw.sqlite --key /tmp/gw.key \
+#     --listen /ip4/127.0.0.1/tcp/40501 --http 8080 &
+#   docker run --rm --network host -v /tmp/zap:/zap/wrk:rw \
+#     ghcr.io/zaproxy/zaproxy:stable \
+#     zap-baseline.py -t http://127.0.0.1:8080 \
+#       -J /zap/wrk/report.json -r /zap/wrk/report.html
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/bin/gateway.rs', 'Cargo.toml', '.github/workflows/security.yml']
+  workflow_dispatch:
+
+jobs:
+  zap:
+    name: Escaneo OWASP ZAP (XSS / SQLi)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Obtener codigo
+        uses: actions/checkout@v4
+
+      - name: Instalar Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Compilar el gateway
+        run: nix develop -c cargo build --bin ponged-gateway
+
+      - name: Crear moderador de prueba
+        run: |
+          mkdir -p /tmp/owasp
+          echo "zap-test-pass" | ./target/debug/ponged-gateway \
+            --db /tmp/owasp/gateway.sqlite --add-moderator zap --role admin
+          echo "moderador creado"
+
+      - name: Arrancar el gateway (HTTP en 127.0.0.1:8080)
+        run: |
+          mkdir -p /tmp/owasp
+          ./target/debug/ponged-gateway \
+            --db /tmp/owasp/gateway.sqlite \
+            --key /tmp/owasp/gateway.key \
+            --listen /ip4/127.0.0.1/tcp/40501 \
+            --http 8080 > /tmp/owasp/gateway.log 2>&1 &
+          echo $! > /tmp/owasp/gateway.pid
+          sleep 5
+          curl -s -o /dev/null -w 'gateway responde: %{http_code}\n' http://127.0.0.1:8080/login
+
+      - name: Correr OWASP ZAP baseline
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/owasp/zap
+          docker run --rm --network host -v /tmp/owasp/zap:/zap/wrk:rw \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://127.0.0.1:8080 \
+              -J /zap/wrk/report.json \
+              -r /zap/wrk/report.html
+          echo "exit del escaneo: $?"
+
+      - name: Fallar solo ante alertas de riesgo High
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          try:
+              data = json.load(open('/tmp/owasp/zap/report.json'))
+          except Exception as e:
+              print(f'no se pudo leer el reporte de ZAP: {e}')
+              sys.exit(1)
+          sites = data.get('site', [])
+          alerts = [a for site in sites for a in site.get('alerts', [])]
+          highs = [a for a in alerts
+                   if str(a.get('riskdesc', '')).split()[0].lower() == 'high']
+          print(f'alertas totales: {len(alerts)} · riesgo High: {len(highs)}')
+          for a in highs:
+              print(f'- HIGH: {a.get("alert")} | {a.get("riskdesc")}')
+          if highs:
+              print('::error::OWASP ZAP encontró alertas de riesgo High')
+              sys.exit(1)
+          print('OK: no hay alertas de riesgo High (XSS/SQLi bajo el umbral)')
+          EOF
+
+      - name: Apagar el gateway
+        if: always()
+        run: |
+          [ -f /tmp/owasp/gateway.pid ] && kill "$(cat /tmp/owasp/gateway.pid)" 2>/dev/null || true
+
+      - name: Publicar informe de ZAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: informe-owasp-zap
+          path: /tmp/owasp/zap/
+          if-no-files-found: error

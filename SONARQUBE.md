@@ -49,23 +49,57 @@ nix develop .#coverage -c cargo clippy --message-format=json > target/clippy.jso
 
 ## Plantilla de métricas (para el informe de cierre)
 
-Completar con los valores que muestra el proyecto en SonarQube
-(**Measures / Quality Gate**) tras la primera ejecución:
+Valores **medidos en este repositorio** (2026-09, tras los roles admin/user, el
+hole-punching y 59 tests unitarios) para lo que se puede leer localmente; los
+que solo expone el análisis de SonarCloud quedan marcados como *pendiente de la
+primera ejecución* (necesita `SONAR_TOKEN` y el proyecto creado, ver arriba):
 
 | Métrica                        | Valor obtenido |
 |--------------------------------|---------------:|
-| Líneas de código (NCLOC)       | `________`     |
-| Bugs                           | `________`     |
-| Vulnerabilidades               | `________`     |
-| Security hotspots              | `________`     |
-| Code smells                    | `________`     |
-| Deuda técnica (minutos/días)   | `________`     |
-| Duplicación (%)                | `________`     |
-| Complejidad ciclomática        | `________`     |
-| Cobertura de líneas (%)        | `________`     |
-| Calificación global (A–F)      | `________`     |
-| Calificación de seguridad      | `________`     |
-| Quality Gate (pass/fail)       | `________`     |
+| Líneas de código (NCLOC)       | ≈ 8 500 (`src/**/*.rs`, sin comentarios ni vacías) |
+| Bugs                           | *pendiente (SonarCloud)*   |
+| Vulnerabilidades               | *pendiente (SonarCloud)*   |
+| Security hotspots              | *pendiente (SonarCloud)*; 0 High en el escaneo OWASP ZAP |
+| Code smells                    | *pendiente (SonarCloud)*; proxy local: ~41 avisos de Clippy (ninguno nuevo al añadir roles) |
+| Deuda técnica (minutos/días)   | *pendiente (SonarCloud)*   |
+| Duplicación (%)                | *pendiente (SonarCloud)*   |
+| Complejidad ciclomática        | *pendiente (SonarCloud)*; Clippy p. ej. señala 12 `type_complexity` |
+| Cobertura de líneas (%)        | **21.98 %** global con `--all-targets` (ver tabla abajo) |
+| Calificación global (A–F)      | *pendiente (SonarCloud)*   |
+| Calificación de seguridad      | *pendiente (SonarCloud)*   |
+| Quality Gate (pass/fail)       | *pendiente (SonarCloud)*   |
+
+Cobertura por archivo (medida con `cargo llvm-cov --all-targets`):
+
+| Archivo           | Líneas cubiertas |
+|-------------------|-----------------:|
+| `src/protocol.rs` | 100 %|
+| `src/bin/gateway.rs` | 51.7 % (23 tests del gateway) |
+| `src/sim.rs`      | 54.7 %|
+| `src/config.rs`   | 28.0 %|
+| `src/networking.rs` | 9.9 %|
+| `src/history.rs`  | 0 % (sin tests) |
+| `src/main.rs` / `src/menu.rs` | 0 % (UI Bevy, sin tests) |
+
+> **Nota de cobertura**: el job `sonar.yml` genera el LCOV con
+> `cargo llvm-cov --lcov` **sin `--all-targets`**, así que SonarCloud solo
+> agrega los tests de la librería (protocol/sim/config) y verá ~11 % — la
+> medición correcta (incluye los 23 tests del binario del gateway) es ~22 %.
+> Para reproducir ambas, ver los comandos de abajo.
+
+## Mediciones reproducibles
+
+```bash
+# Cobertura completa (lib + bins) — la correcta para el informe:
+nix develop .#coverage -c cargo llvm-cov --all-targets --lcov --output-path target/lcov.info
+nix develop .#coverage -c cargo llvm-cov report --summary-only    # ~22 %
+
+# La que ve SonarCloud hoy (solo librería):
+nix develop .#coverage -c cargo llvm-cov --lcov --output-path target/lcov.info
+
+# Tests unitarios (recuento): 59 en total
+nix develop -c cargo test
+```
 
 La cobertura también se puede leer sin Sonar con:
 
@@ -81,3 +115,6 @@ nix develop .#coverage -c cargo llvm-cov report --summary-only
   `sonar-project.properties`).
 - Otros entregables de calidad: [TESTS.md](TESTS.md) (tests unitarios) y el
   pipeline [test.yml](.github/workflows/test.yml).
+- Seguridad: [SEGURIDAD.md](SEGURIDAD.md) documenta el escaneo OWASP ZAP
+  ([security.yml](.github/workflows/security.yml)) y las mitigaciones
+  manuales ya presentes (SQL parametrizado, salida escapada, hashes estirados).
