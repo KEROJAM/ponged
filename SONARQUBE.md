@@ -69,35 +69,37 @@ primera ejecución* (necesita `SONAR_TOKEN` y el proyecto creado, ver arriba):
 | Calificación de seguridad      | *pendiente (SonarCloud)*   |
 | Quality Gate (pass/fail)       | *pendiente (SonarCloud)*   |
 
-Cobertura por archivo (medida con `cargo llvm-cov --all-targets`):
+Cobertura por archivo (medida con `cargo llvm-cov --all-targets`,
+2026-09-23, tras 105 tests):
 
 | Archivo           | Líneas cubiertas |
 |-------------------|-----------------:|
 | `src/protocol.rs` | 100 %|
-| `src/bin/gateway.rs` | 51.7 % (23 tests del gateway) |
-| `src/sim.rs`      | 54.7 %|
-| `src/config.rs`   | 28.0 %|
-| `src/networking.rs` | 9.9 %|
-| `src/history.rs`  | 0 % (sin tests) |
-| `src/main.rs` / `src/menu.rs` | 0 % (UI Bevy, sin tests) |
+| `src/sim.rs`      | 85.9 %|
+| `src/config.rs`   | 87.6 %|
+| `src/history.rs`  | 75.9 % (base SQLCipher cifrada, por inyección de ruta) |
+| `src/bin/gateway.rs` | 67.8 % (38 tests del gateway) |
+| `src/networking.rs` | 31.0 %|
+| `src/main.rs` / `src/menu.rs` | ~0 % (UI Bevy, sin tests) |
 
-> **Nota de cobertura**: el job `sonar.yml` genera el LCOV con
-> `cargo llvm-cov --lcov` **sin `--all-targets`**, así que SonarCloud solo
-> agrega los tests de la librería (protocol/sim/config) y verá ~11 % — la
-> medición correcta (incluye los 23 tests del binario del gateway) es ~22 %.
-> Para reproducir ambas, ver los comandos de abajo.
+> **Nota de cobertura global**: el job `sonar.yml` genera el LCOV con
+> `cargo llvm-cov` (que ya ejecuta los tests de *lib y bins*), así que
+> SonarCloud ve **≈ 39 %** de líneas — la misma medición que
+> `--all-targets` (39.0 %). La meta del 80 % del enunciado se adapta en
+> este proyecto a la lógica de red/protocolo/gateway (ver nota en
+> `ProyectoFinal.org`, sección de calidad).
 
 ## Mediciones reproducibles
 
 ```bash
 # Cobertura completa (lib + bins) — la correcta para el informe:
 nix develop .#coverage -c cargo llvm-cov --all-targets --lcov --output-path target/lcov.info
-nix develop .#coverage -c cargo llvm-cov report --summary-only    # ~22 %
+nix develop .#coverage -c cargo llvm-cov report --summary-only    # ~39 %
 
-# La que ve SonarCloud hoy (solo librería):
+# La que ve SonarCloud hoy (lib + bins, casi idéntica):
 nix develop .#coverage -c cargo llvm-cov --lcov --output-path target/lcov.info
 
-# Tests unitarios (recuento): 59 en total
+# Tests unitarios (recuento): 105 en total
 nix develop -c cargo test
 ```
 

@@ -86,8 +86,11 @@ impl MatchHistory {
         if self.db.is_some() {
             return;
         }
-        let db_path = Self::db_path();
-        let Ok(conn) = Connection::open(&db_path) else {
+        self.open_path(&Self::db_path());
+    }
+
+    fn open_path(&mut self, db_path: &str) {
+        let Ok(conn) = Connection::open(db_path) else {
             warn!("Could not open local match history database");
             return;
         };
@@ -447,4 +450,157 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
         .map(|pair| std::str::from_utf8(pair).ok().and_then(|s| u8::from_str_radix(s, 16).ok()))
         .collect::<Option<_>>()?;
     (bytes.len() == hex.len() / 2).then_some(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(name: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("ponged-history-test-{name}.sqlite"))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn open_test_history(name: &str) -> MatchHistory {
+        let path = temp_db_path(name);
+        let _ = std::fs::remove_file(&path);
+        let mut history = MatchHistory::default();
+        history.open_path(&path);
+        assert!(history.db.is_some(), "history DB should open");
+        history
+    }
+
+    fn insert_match(history: &MatchHistory, id: i64, my: i32, opp: i32, gw_id: i64) {
+        let conn = history.db.as_ref().unwrap().lock().unwrap();
+        conn.execute(
+            "INSERT INTO matches (id, happened_at, rival, my_score, opp_score, was_host, gateway_match_id, rival_peer)
+             VALUES (?1, datetime('now'), 'rival', ?2, ?3, 1, ?4, NULL)",
+            params![id, my, opp, gw_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hex_roundtrips() {
+        let bytes = [0x00u8, 0x01, 0xab, 0xff, 0x10];
+        assert_eq!(decode_hex(&encode_hex(&bytes)).unwrap(), bytes);
+        assert_eq!(decode_hex("0x"), None);
+        assert_eq!(decode_hex("zz"), None);
+        assert_eq!(decode_hex("a"), None);
+    }
+
+    #[test]
+    fn wins_losses_and_draws_ignore_revoked() {
+        let mut history = MatchHistory::default();
+        history.records = vec![
+            MatchRecord { id: 3, happened_at: String::new(), rival: "a".into(), rival_peer: None, my_score: 5, opp_score: 2, was_host: true, gateway_match_id: 3, revoked: false },
+            MatchRecord { id: 2, happened_at: String::new(), rival: "b".into(), rival_peer: None, my_score: 1, opp_score: 5, was_host: true, gateway_match_id: 2, revoked: false },
+            MatchRecord { id: 1, happened_at: String::new(), rival: "c".into(), rival_peer: None, my_score: 3, opp_score: 3, was_host: true, gateway_match_id: 1, revoked: false },
+            MatchRecord { id: 0, happened_at: String::new(), rival: "d".into(), rival_peer: None, my_score: 5, opp_score: 0, was_host: true, gateway_match_id: 0, revoked: true },
+        ];
+        assert_eq!(history.wins_losses(), (1, 1, 1));
+        assert_eq!(history.revoked_count(), 1);
+    }
+
+    #[test]
+    fn rating_defaults_when_unset() {
+        let history = MatchHistory::default();
+        assert_eq!(history.load_rating(), DEFAULT_RATING);
+        assert_eq!(history.load_username(), None);
+        assert_eq!(history.load_rating_proof(), None);
+    }
+
+    #[test]
+    fn open_creates_schema_and_migrates_columns() {
+        let history = open_test_history("migrate");
+        let conn = history.db.as_ref().unwrap().lock().unwrap();
+        let has_full_columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('matches')
+                 WHERE name IN ('gateway_match_id', 'revoked', 'rival_peer')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_full_columns, 3);
+    }
+
+    #[test]
+    fn recording_and_reloading_builds_records_newest_first() {
+        let mut history = open_test_history("reload");
+        insert_match(&history, 1, 5, 2, 100);
+        insert_match(&history, 2, 1, 5, 101);
+        history.reload();
+        assert_eq!(history.records.len(), 2);
+        assert_eq!(history.records[0].id, 2);
+        assert_eq!(history.records[0].rival, "rival");
+        assert!(history.records[0].was_host);
+        assert_eq!(history.records[0].gateway_match_id, 101);
+        assert_eq!(history.wins_losses(), (1, 1, 0));
+    }
+
+    #[test]
+    fn mark_match_revoked_updates_records_and_rev() {
+        let mut history = open_test_history("revoke");
+        insert_match(&history, 1, 5, 2, 100);
+        history.reload();
+        assert!(!history.records[0].revoked);
+
+        history.mark_match_revoked(100);
+        assert!(history.records[0].revoked);
+        assert_eq!(history.revoked_count(), 1);
+        assert_eq!(history.wins_losses(), (0, 0, 0));
+
+        let rev_before = history.rev;
+        history.mark_match_revoked(999);
+        assert_eq!(history.rev, rev_before, "unknown match must not bump rev");
+    }
+
+    #[test]
+    fn correct_score_overwrites_and_recomputes_tally() {
+        let mut history = open_test_history("correct");
+        insert_match(&history, 1, 5, 0, 100);
+        history.reload();
+        assert_eq!(history.wins_losses(), (1, 0, 0));
+
+        history.correct_score(100, 0, 5);
+        assert_eq!(history.records[0].my_score, 0);
+        assert_eq!(history.records[0].opp_score, 5);
+        assert_eq!(history.wins_losses(), (0, 1, 0));
+    }
+
+    #[test]
+    fn username_and_rating_persist_roundtrip() {
+        let history = open_test_history("settings");
+        assert_eq!(history.load_username(), None);
+        history.save_username("Jahil");
+        history.save_rating(1234);
+        assert_eq!(history.load_username().as_deref(), Some("Jahil"));
+        assert_eq!(history.load_rating(), 1234);
+
+        let mut reloaded = MatchHistory::default();
+        reloaded.open_path(&temp_db_path("settings"));
+        assert_eq!(reloaded.load_username().as_deref(), Some("Jahil"));
+        assert_eq!(reloaded.load_rating(), 1234);
+    }
+
+    #[test]
+    fn rating_proof_roundtrips_through_settings() {
+        let history = open_test_history("proof");
+        let proof = RatingProof {
+            rating: 1500,
+            seq: 7,
+            gateway: "12D3KooWxxxx".into(),
+            signature: vec![1, 2, 3, 4],
+        };
+        history.save_rating_proof(&proof);
+        let loaded = history.load_rating_proof().expect("proof roundtrip");
+        assert_eq!(loaded, proof);
+
+        let mut reloaded = MatchHistory::default();
+        reloaded.open_path(&temp_db_path("proof"));
+        assert_eq!(reloaded.load_rating_proof(), Some(proof));
+    }
 }

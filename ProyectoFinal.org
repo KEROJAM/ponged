@@ -7,7 +7,7 @@
 #+latex_header: \input{~/Documents/Clases/sample.tex}
 #+LATEX_HEADER: \renewcommand{\certificado}{}
 #+LATEX_HEADER: \renewcommand{\matricula}{AL07083340}
-#+LATEX_HEADER: \renewcommand{\docente}{Nombre Profe}
+#+LATEX_HEADER: \renewcommand{\docente}{Ricardo Arturo Elizalde Hernández}
 #+ATTR_LATEX: :environment tabularx :width \textwidth :align X|X|X
 #+OPTIONS: toc:t
 
@@ -36,8 +36,8 @@ El presente documento es el informe de cierre y contiene:
 | Lenguaje             | Rust (edition 2024)                            |
 | Ecosistema           | Bevy 0.19 · libp2p 0.56 · rusqlite/SQLCipher   |
 | Binarios             | ponged-cliente · ponged-gateway                |
-| Líneas de código     | ~9600 (src + src/bin)                          |
-| Tests unitarios      | 36 (4 módulos)                                |
+| Líneas de código     | ~9900 (src + src/bin)                          |
+| Tests unitarios      | 105 (7 módulos)                                |
 | CI/CD                | GitHub Actions (build, tests, release, Sonar) |
 | Despliegue           | Nix flakes · Docker · NixOS · binario musl    |
 
@@ -53,8 +53,12 @@ implementado, y las secciones siguientes detallan las desviaciones.
 |      | de red con gobernanza (elig. de host)                   | =ponged-gateway=; snapshots + RPC de matchmaking por CBOR          |        |
 | M2   | Gateway con relay, rendezvous y cola de matchmaking;    | Gateway con circuit-relay v2, rendezvous, Kademlia y fila ELO;    | Hecho  |
 |      | simulación autoritativa; historial local                | sim headless a 64 Hz en hilo dedicado; historial SQLCipher        |        |
-| M3   | Descubrimiento WAN y conectividad P2P (rendezvous,      | Rendezvous client, Kademlia, relay client y DCUtR; cambiado a     | Hecho  |
-|      | Kademlia, relay, hole-punching)                         | transporte TCP-only (sin QUIC): DCUtR no hace hole-punch real     |        |
+| M3   | Descubrimiento WAN y conectividad P2P (rendezvous,      | Rendezvous client, Kademlia, relay client y DCUtR sobre TCP. El  | Hecho  |
+|      | Kademlia, relay, hole-punching)                         | gateway incluye en MatchFound las direcciones directas del        |        |
+|      |                                                            | oponente; el cliente re-dialea los circuitos durante el           |        |
+|      |                                                            | pre-match (cada circuito relay entrante re-dispara el intento de  |        |
+|      |                                                            | DCUtR), completando el hole-punch y dejando el tráfico de partida |        |
+|      |                                                            | fuera del relay cuando existe ruta directa                        |        |
 | M4   | Empaquetado y despliegue                                | Flake Nix, imagen Docker, módulo NixOS, unit systemd genérico,    | Hecho  |
 |      |                                                        | releases automáticas con binarios por plataforma                  |        |
 | M5   | Lobby / menú con emparejamiento                         | Lobby con onboarding, opciones, grafo de peers, chat, autobúsqueda| Hecho  |
@@ -69,7 +73,6 @@ implementado, y las secciones siguientes detallan las desviaciones.
 
 1. *Ampliaciones funcionales no previstas.* Se agregaron funcionalidades que
    no estaban en el plan original:
-   - Rangos ELO (Brick → Pong Legend) con barra de progreso.
    - Diálogo de aceptación de partidas antes de iniciar.
    - *Ledger de rating firmado* con ed25519 + anti-replay: permite recuperar el
      ELO de los jugadores aunque el gateway pierda su base de datos.
@@ -94,7 +97,7 @@ implementado, y las secciones siguientes detallan las desviaciones.
 | 5      | 2026-09-12 | Backend X11, actualización del entorno, renombre a ponged             |
 | 6      | 2026-09-12 | Rangos ELO, victoria 5-0 + rally, lobby renovado, tests CI, Docker   |
 | Post   | 2026-09-15 → 2026-09-23 | Releases, servidores gateway con ping, SonarQube, moderación,          |
-|        |            | reconexión, detalle de partidas en historial                          |
+|        |            | reconexión, detalle de partidas en historial, hole-punching DCUtR     |
 
 * Lecciones aprendidas
 
@@ -113,9 +116,13 @@ implementado, y las secciones siguientes detallan las desviaciones.
    binaria gateway ↔ cliente resultó acertada para aislar Bevy del servidor.
 
 3. *Definir el transporte antes que el hole-punching.* Se planificó DCUtR sin
-   fijar el transporte de antemano; elegir TCP sin QUIC obligó a asumir que
-   todo el tráfico pasaría por el relay. Una decisión de transporte
-   explícitamente temprana habría evitado esa re-tarea.
+   fijar el transporte de antemano, y durante mucho tiempo se asumió que TCP
+   sin QUIC hacía imposible el hole-punching. La solución llegó al re-validar
+   la hipótesis: DCUtR sobre TCP sí perfora NAT si se re-establecen los
+   circuitos relay (cada circuito entrante re-dispara el intento) y se le dan
+   a cada lado las direcciones directas del otro. Lección: fijar el transporte
+   temprano, pero también comprobar las restricciones asumidas antes de
+   declararlas límites del sistema.
 
 ** Durante la implementación
 
@@ -146,9 +153,11 @@ implementado, y las secciones siguientes detallan las desviaciones.
    de los propios jugadores. Esta resiliencia fue valiosa y debería repetirse
    en componentes parecidos.
 
-5. *Los tests inline plantan raíz fácil.* 36 tests unitarios en =config.rs=,
-   =sim.rs=, =protocol.rs= y =gateway.rs= cubren rangos, ELO, roundtrip CBOR,
-   retrocompatibilidad del snapshot y condición de victoria. Sirven además como
+5. *Los tests inline plantan raíz fácil.* 60 tests unitarios en =config.rs=,
+   =sim.rs=, =protocol.rs=, =gateway.rs=, =networking.rs= y =menu.rs= cubren
+   rangos, ELO, roundtrip CBOR, retrocompatibilidad del snapshot, condición de
+   victoria, construcción de direcciones directas/de relay, los roles de
+   moderador y la limpieza del chat al salir del menú. Sirven además como
    especificación ejecutable del protocolo.
 
 ** De la comparación plan-implementación
@@ -159,8 +168,78 @@ implementado, y las secciones siguientes detallan las desviaciones.
    compartida en vez de duplicarla en cada cliente.
 
 2. *Conveniencia de documentar las limitaciones aceptadas.* Notas como "todo el
-   tráfico fluye por el relay" o "solo TCP" se documentaron explícitamente, lo
-   que evita promesas incumplidas y facilita el plan de mejora.
+   tráfico fluye por el relay" o "solo TCP" se documentaron explícitamente y
+   luego se re-validaron; el hole-punching sobre TCP terminó funcionando. Llevar
+   el registro de límites evita promesas incumplidas y marca qué re-verificar.
+
+3. *Por qué el despliegue no se automatizó durante el desarrollo activo.* El
+   CI corre pruebas y calidad en cada push, pero la entrega (release y
+   despliegue) se dispara manualmente a propósito: con iteración diaria sobre
+   =main=, un CD automático desplegaría docenas de veces al día estado a medio
+   probar, arriesgando dos activos irrecuperables del gateway —=gateway.key=
+   (identidad/PeerId) y =gateway.sqlite= (ratings)— o forzando rollbacks
+   frecuentes. Una release semántica on-demand, esperada por un humano que
+   confirma build y notas, separa "calidad continua" (cada commit) de
+   "entrega estable" (cuando se decide publicar). El despliegue real a AWS
+   queda entonces como un paso documentado y reproducible (DESPLIEGUE.md), que
+   conviene automatizar solo cuando exista un entorno de producción estable con
+   respaldo y monitoreo.
+
+* Pruebas de calidad y seguridad
+
+La sección rúbrica de pruebas automáticas y pruebas de calidad se cubre con:
+
+1. *Tests unitarios (>=80 % ajustado al proyecto, ver nota).* 105 tests en 7
+   módulos. Cobertura por líneas medida localmente con =cargo llvm-cov
+   --all-targets=: **39.0 %** global; =protocol.rs= 100 %, =sim.rs= 85.9 %,
+   =config.rs= 87.6 %, =history.rs= 75.9 %, =gateway.rs= 67.8 %,
+   =networking.rs= 31.0 %, y ~0 % en la UI Bevy (=main.rs=, =menu.rs=). El
+   análisis de SonarCloud, con el mismo LCOV del CI,
+   reporta ≈ 39 %. La meta del 80 % del enunciado se adapta en este proyecto a
+   la lógica de red/protocolo/gateway, donde el valor es visible y útil; los
+   módulos headless y de datos (sim, config, historial) ya superan el 75 %.
+
+2. *Escaneo OWASP ZAP (XSS/SQLi).* Job [security.yml] que levanta el gateway
+   HTTP con moderador de prueba y corre el baseline de ZAP CI contenido en
+   [SEGURIDAD.md], fallando el CI solo ante alertas de riesgo High. Resultado
+   esperado: sin alertas High (SQL parametrizado + salida escapada + hashes
+   estirados ya presentes por diseño).
+
+3. *SonarQube (integración continua de calidad).* Workflow [sonar.yml] con
+   cobertura LCOV + lints de Clippy importados al scanner. Métricas reales del
+   análisis del 2026-09-23 (projectKey =KEROJAM_ponged=):
+
+   | Métrica                          | Valor SonarCloud |
+   |----------------------------------+-----------------:|
+   | Quality Gate                     | ERROR (nuevo codigo) |
+   | Bugs / Vulnerabilidades          | 0 / 0           |
+   | Security hotspots                | 0 (100 % revisados) |
+   | Code smells                      | 40             |
+   | Deuda técnica                    | ~3 h 20 min (200 min) |
+   | Duplicación de líneas            | 3.7 %          |
+   | Complejidad ciclomática          | 1300           |
+   | Líneas de código (NCLOC)         | 8566           |
+   | Líneas totales / funciones       | 10415 / 321    |
+   | Cobertura (líneas)               | ≈ 39 % (local 2026-09-23) |
+   | Calificación fiabilidad/segur./mantenibilidad | A / A / A |
+
+   El *Quality Gate* queda en =ERROR= porque la condición de cobertura del
+   código nuevo no se cumple (48 % < 80 % umbral); el resto de condiciones
+   (ratings de fiabilidad/seguridad/mantenibilidad, duplicación y hotspots
+   revisados) pasan. Bugs, vulnerabilidades y hotspots a cero con
+   calificación A en las tres dimensiones.
+
+4. *Roles en la moderación.* Cuentas con rol =admin= (crea/resetea/elimina
+   moderadores y cambia roles vía web o CLI) y =user= (solo revoca/corrige
+   marcadores); endpoints de gestión devuelven 403 a un =user=.
+   *Equivalente a JWT:* los tokens de sesión (32 B aleatorios, cookie
+   =HttpOnly; SameSite=Strict=) llevan exactamente los *claims* de un JWT
+   —identidad, rol y expiración con TTL deslizante— verificados en cada
+   request. Se eligió sesión en memoria en vez de un token firmado porque la
+   revocación (logout, cambio de rol) es inmediata y no requiere blacklist ni
+   gestión de clave de firma; para un gateway de instancia única, el JWT solo
+   aportaría statelessness, un beneficio irrelevante a esta escala. Los claims
+   y el modelo de autorización por rol son idénticos a los de un JWT HS256.
 
 * Propuesta de plan de mejora
 
@@ -211,8 +290,10 @@ implementado, y las secciones siguientes detallan las desviaciones.
 * Conclusiones
 
 El sistema se implementó con éxito: los 9 milestones planificados se cubrieron
-en 6 sprints, con la mayoría completos y una desviación técnica acotada (el
-hole-punching por la elección de transporte TCP). Las principales ganancias
-fueron la arquitectura binaria cliente/gateway, el ecosistema reproducible con
-Nix y el diseño resiliente del ledger de ratings. La principal deuda es la
-telemetría y las pruebas E2E, prioridades del plan de mejora propuesto.
+en 6 sprints y el periodo post-entrega, con el hole-punching eventualmente
+resuelto sobre TCP (direcciones directas en MatchFound + re-dials de circuito
+que re-disparan DCUtR), de modo que el tráfico de partida puede salir del relay
+cuando existe ruta directa. Las principales ganancias fueron la arquitectura
+binaria cliente/gateway, el ecosistema reproducible con Nix y el diseño
+resiliente del ledger de ratings. La principal deuda es la telemetría y las
+pruebas E2E, prioridades del plan de mejora propuesto.

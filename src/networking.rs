@@ -253,8 +253,13 @@ fn client_key_path() -> std::path::PathBuf {
 /// restarts. Falls back to a fresh in-memory key if the file is unreadable or
 /// unwritable, in which case the identity (and any rating) is ephemeral.
 fn load_or_create_client_key() -> libp2p::identity::Keypair {
-    let path = client_key_path();
-    if let Ok(bytes) = std::fs::read(&path) {
+    load_or_create_client_key_at(&client_key_path())
+}
+
+/// Same as [`load_or_create_client_key`] but against an explicit path (used by
+/// tests to avoid touching the user's real identity).
+fn load_or_create_client_key_at(path: &std::path::Path) -> libp2p::identity::Keypair {
+    if let Ok(bytes) = std::fs::read(path) {
         let mut bytes = bytes;
         if let Ok(keypair) = libp2p::identity::Keypair::ed25519_from_bytes(bytes.as_mut_slice()) {
             return keypair;
@@ -266,7 +271,7 @@ fn load_or_create_client_key() -> libp2p::identity::Keypair {
         std::fs::create_dir_all(parent).unwrap_or_default();
     }
     if let Ok(ed25519) = keypair.clone().try_into_ed25519() {
-        if std::fs::write(&path, ed25519.secret().as_ref()).is_err() {
+        if std::fs::write(path, ed25519.secret().as_ref()).is_err() {
             warn!(
                 "Could not persist client key to {path:?}; identity is ephemeral this run"
             );
@@ -628,5 +633,69 @@ mod tests {
         direct.push(Protocol::Tcp(43321));
         direct.push(Protocol::P2p(fixed_peer(0x33)));
         assert!(!is_circuit(&direct));
+    }
+
+    #[test]
+    fn base_addr_drops_trailing_peer_protocol() {
+        let mut addr = Multiaddr::empty();
+        addr.push(Protocol::Ip4("203.0.113.10".parse().unwrap()));
+        addr.push(Protocol::Tcp(4001));
+        addr.push(Protocol::P2p(fixed_peer(0x11)));
+        let state = GatewayState {
+            addr: Some(addr),
+            ..Default::default()
+        };
+        let base = state.base_addr().expect("base addr");
+        assert_eq!(base.to_string(), "/ip4/203.0.113.10/tcp/4001");
+    }
+
+    #[test]
+    fn base_addr_without_peer_is_unchanged() {
+        let mut addr = Multiaddr::empty();
+        addr.push(Protocol::Ip4("203.0.113.10".parse().unwrap()));
+        addr.push(Protocol::Tcp(4001));
+        let state = GatewayState {
+            addr: Some(addr.clone()),
+            ..Default::default()
+        };
+        assert_eq!(state.base_addr(), Some(addr));
+    }
+
+    #[test]
+    fn base_addr_is_none_without_address() {
+        let state = GatewayState::default();
+        assert_eq!(state.base_addr(), None);
+    }
+
+    #[test]
+    fn gateway_agent_is_detected_by_prefix() {
+        assert!(is_gateway_agent(GATEWAY_AGENT_VERSION));
+        assert!(is_gateway_agent(&format!("some/0.1.0 {}", GATEWAY_AGENT_VERSION)));
+        assert!(!is_gateway_agent("pong/1.0.0"));
+        assert!(!is_gateway_agent(""));
+    }
+
+    #[test]
+    fn client_key_persists_across_loads() {
+        let path = std::env::temp_dir().join("ponged-key-test-ed25519.key");
+        let _ = std::fs::remove_file(&path);
+
+        let first = load_or_create_client_key_at(&path);
+        let second = load_or_create_client_key_at(&path);
+        assert_eq!(first.public().to_peer_id(), second.public().to_peer_id());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn invalid_key_file_is_replaced() {
+        let path = std::env::temp_dir().join("ponged-key-test-corrupt.key");
+        std::fs::write(&path, b"not an ed25519 key at all").expect("write garbage");
+
+        let key = load_or_create_client_key_at(&path);
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(size, 32, "corrupt key must be regenerated and persisted");
+        assert!(!key.try_into_ed25519().is_err());
+
+        let _ = std::fs::remove_file(&path);
     }
 }

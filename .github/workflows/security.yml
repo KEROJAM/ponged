@@ -55,21 +55,62 @@ jobs:
             --listen /ip4/127.0.0.1/tcp/40501 \
             --http 8080 > /tmp/owasp/gateway.log 2>&1 &
           echo $! > /tmp/owasp/gateway.pid
-          sleep 5
-          curl -s -o /dev/null -w 'gateway responde: %{http_code}\n' http://127.0.0.1:8080/login
+          # Esperar (hasta ~30 s) a que el login responda.
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/login 2>/dev/null || true)
+            if [ "$code" = "200" ]; then
+              echo "gateway responde: $code (tras ${i}s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "gateway no respondió en 30 s; log:"
+          cat /tmp/owasp/gateway.log
+          exit 1
+
+      - name: Descargar imagen de ZAP (explícito, para ver fallos)
+        run: |
+          docker pull ghcr.io/zaproxy/zaproxy:stable
+          [ -n "$(docker images -q ghcr.io/zaproxy/zaproxy:stable)" ] \
+            && echo "imagen lista" || exit 1
 
       - name: Correr OWASP ZAP baseline
         continue-on-error: true
         run: |
           mkdir -p /tmp/owasp/zap
+          set +e
           docker run --rm --network host -v /tmp/owasp/zap:/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py -t http://127.0.0.1:8080 \
               -J /zap/wrk/report.json \
-              -r /zap/wrk/report.html
-          echo "exit del escaneo: $?"
+              -r /zap/wrk/report.html > /tmp/owasp/zap/zap.log 2>&1
+          rc=$?
+          echo "exit del escaneo: $rc"
+          echo "=== contenido de /tmp/owasp/zap ==="
+          ls -la /tmp/owasp/zap || true
+          echo "=== últimas 60 líneas de zap.log ==="
+          tail -60 /tmp/owasp/zap/zap.log || true
+          [ -f /tmp/owasp/zap/report.json ] && echo "report.json generado" || echo "report.json NO generado"
+          exit 0
+
+      - name: Diagnóstico y fallo si ZAP no generó reporte
+        if: always()
+        run: |
+          if [ -f /tmp/owasp/zap/report.json ]; then
+            echo "OK: report.json presente"
+            exit 0
+          fi
+          echo "::error::OWASP ZAP no generó report.json — diagnóstico:"
+          echo "===== gateway.log ====="
+          cat /tmp/owasp/gateway.log 2>/dev/null || echo "(sin gateway.log)"
+          echo "===== zap.log (últimas 120 líneas) ====="
+          tail -120 /tmp/owasp/zap/zap.log 2>/dev/null || echo "(sin zap.log)"
+          echo "===== el gateway responde ahora? ====="
+          curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/login || echo "no responde"
+          exit 1
 
       - name: Fallar solo ante alertas de riesgo High
+        if: success()
         run: |
           python3 - <<'EOF'
           import json, sys
@@ -83,6 +124,8 @@ jobs:
           highs = [a for a in alerts
                    if str(a.get('riskdesc', '')).split()[0].lower() == 'high']
           print(f'alertas totales: {len(alerts)} · riesgo High: {len(highs)}')
+          for a in alerts:
+              print(f'- {a.get("riskdesc")}: {a.get("alert")}')
           for a in highs:
               print(f'- HIGH: {a.get("alert")} | {a.get("riskdesc")}')
           if highs:
@@ -102,4 +145,4 @@ jobs:
         with:
           name: informe-owasp-zap
           path: /tmp/owasp/zap/
-          if-no-files-found: error
+          if-no-files-found: warn

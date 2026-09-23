@@ -225,7 +225,7 @@ pub fn pull_sim_state(
 
 // --- Simulation thread ----------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum CollisionSide {
     Left,
     Right,
@@ -656,5 +656,217 @@ mod tests {
         state.ball = Vec2::new(-FIELD_SIZE.x / 2.0 + EDGE + 7.0, 0.0);
         state.ball_velocity = Vec2::new(-BALL_SPEED, 0.0);
         state.step();
+    }
+
+    fn test_peer() -> PeerId {
+        libp2p::identity::Keypair::generate_ed25519().public().to_peer_id()
+    }
+
+    #[test]
+    fn constrain_paddle_clamps_between_gutters() {
+        let limit = FIELD_SIZE.y / 2.0 - EDGE + GUTTER_HEIGHT / 2.0 + PADDLE_SHAPE.half_size.y;
+        let mut high = Vec2::new(-380.0, 9999.0);
+        constrain_paddle(&mut high);
+        assert_eq!(high.y, limit);
+        let mut low = Vec2::new(380.0, -9999.0);
+        constrain_paddle(&mut low);
+        assert_eq!(low.y, -limit);
+        let mut mid = Vec2::new(-380.0, 0.0);
+        constrain_paddle(&mut mid);
+        assert_eq!(mid.y, 0.0);
+    }
+
+    #[test]
+    fn paddle_bounce_flips_horizontal_velocity() {
+        let mut state = SimState::new(None);
+        state.ball = Vec2::new(-374.0, 0.0);
+        state.ball_velocity = Vec2::new(-BALL_SPEED, 0.0);
+        state.handle_paddle_bounces();
+        assert_eq!(state.ball_velocity.x, BALL_SPEED);
+        assert!(state.ball_speed_mult > 1.0);
+    }
+
+    #[test]
+    fn opponent_paddle_bounce_sends_ball_back_left() {
+        let mut state = SimState::new(None);
+        state.ball = Vec2::new(374.0, 0.0);
+        state.ball_velocity = Vec2::new(BALL_SPEED, 0.0);
+        state.handle_paddle_bounces();
+        assert_eq!(state.ball_velocity.x, -BALL_SPEED);
+        assert!(state.ball_speed_mult > 1.0);
+    }
+
+    #[test]
+    fn dead_center_hit_rebounces_toward_side_it_came() {
+        let mut state = SimState::new(None);
+        state.ball = Vec2::new(-380.0, 0.0);
+        state.ball_velocity = Vec2::new(-BALL_SPEED, 0.0);
+        state.handle_paddle_bounces();
+        assert_eq!(state.ball_velocity.x, BALL_SPEED);
+    }
+
+    #[test]
+    fn top_gutter_flips_vertical_velocity() {
+        let mut state = SimState::new(None);
+        state.ball = Vec2::new(0.0, 287.0);
+        state.ball_velocity = Vec2::new(1.0, BALL_SPEED);
+        state.step();
+        assert!(state.ball_velocity.y < 0.0, "expected upward hit to bounce down");
+        assert!(state.ball_velocity.x > 0.0);
+    }
+
+    #[test]
+    fn bottom_gutter_flips_vertical_velocity() {
+        let mut state = SimState::new(None);
+        state.ball = Vec2::new(0.0, -287.0);
+        state.ball_velocity = Vec2::new(1.0, -BALL_SPEED);
+        state.step();
+        assert!(state.ball_velocity.y > 0.0, "expected downward hit to bounce up");
+        assert!(state.ball_velocity.x > 0.0);
+    }
+
+    #[test]
+    fn goal_resets_ball_position_and_rally_speed() {
+        let mut state = SimState::new(None);
+        state.ball_speed_mult = MAX_BALL_SPEED_MULT;
+        state.ball = Vec2::new(half_field_x(), 0.0);
+        state.step();
+        assert_eq!(state.score_player, 1);
+        assert_eq!(state.score_opponent, 0);
+        assert!(!state.match_over);
+        assert_eq!(state.ball, Vec2::ZERO);
+        assert_eq!(state.ball_velocity.x, -BALL_SPEED);
+        assert_eq!(state.ball_speed_mult, 1.0);
+    }
+
+    #[test]
+    fn apply_sets_player_velocity_and_opponent_target() {
+        let mut state = SimState::new(None);
+        apply(&mut state, SimCommand::SetPlayerVelocity(PADDLE_SPEED));
+        assert_eq!(state.player_velocity, PADDLE_SPEED);
+        apply(&mut state, SimCommand::RemotePaddle(123.0));
+        assert_eq!(state.opponent_target_y, 123.0);
+    }
+
+    #[test]
+    fn opponent_paddle_eases_toward_target() {
+        let mut state = SimState::new(None);
+        state.opponent_paddle.y = 0.0;
+        state.opponent_target_y = 100.0;
+        state.step();
+        assert!(
+            (state.opponent_paddle.y - 80.0).abs() < 1e-3,
+            "expected paddle near 80, got {}",
+            state.opponent_paddle.y
+        );
+    }
+
+    #[test]
+    fn collision_side_detection_returns_all_four_sides() {
+        use CollisionSide::*;
+        let horizontal = Aabb2d::new(Vec2::ZERO, Vec2::new(400.0, 100.0));
+        assert_eq!(
+            collide_with_side(Aabb2d::new(Vec2::new(-402.0, 0.0), Vec2::new(2.5, 2.5)), horizontal),
+            Some(Left)
+        );
+        assert_eq!(
+            collide_with_side(Aabb2d::new(Vec2::new(402.0, 0.0), Vec2::new(2.5, 2.5)), horizontal),
+            Some(Right)
+        );
+        let vertical = Aabb2d::new(Vec2::ZERO, Vec2::new(100.0, 400.0));
+        assert_eq!(
+            collide_with_side(Aabb2d::new(Vec2::new(0.0, 402.0), Vec2::new(2.5, 2.5)), vertical),
+            Some(Top)
+        );
+        assert_eq!(
+            collide_with_side(Aabb2d::new(Vec2::new(0.0, -402.0), Vec2::new(2.5, 2.5)), vertical),
+            Some(Bottom)
+        );
+        assert_eq!(
+            collide_with_side(Aabb2d::new(Vec2::new(0.0, 150.0), Vec2::new(2.5, 2.5)), horizontal),
+            None
+        );
+    }
+
+    #[test]
+    fn snapshot_and_publish_reflect_authoritative_state() {
+        let mut state = SimState::new(None);
+        state.seq = 9;
+        state.ball = Vec2::new(42.0, -7.0);
+        state.score_player = 3;
+        state.score_opponent = 1;
+        state.match_over = true;
+        state.ball_speed_mult = 2.0;
+
+        let snap = build_snapshot(&state);
+        assert_eq!(snap.seq, 9);
+        assert!(snap.is_host);
+        assert_eq!(snap.ball.x, 42.0);
+        assert_eq!(snap.ball.y, -7.0);
+        assert_eq!(snap.player_score, 3);
+        assert_eq!(snap.opponent_score, 1);
+        assert!(snap.match_over);
+        assert_eq!(snap.ball_speed_mult, 2.0);
+
+        let output = Arc::new(Mutex::new(SimOutput::new()));
+        publish(&state, &output);
+        let out = output.lock().unwrap();
+        assert_eq!(out.ball, state.ball);
+        assert_eq!(out.player_paddle, state.player_paddle);
+        assert_eq!(out.score_player, 3);
+        assert_eq!(out.score_opponent, 1);
+        assert!(out.match_over);
+    }
+
+    #[test]
+    fn migration_swaps_paddles_and_scores_from_senders_frame() {
+        let seed = GameSnapshot {
+            seq: 5,
+            is_host: true,
+            ball: Point2 { x: 1.0, y: 2.0 },
+            ball_velocity: Point2 { x: -1.0, y: 1.0 },
+            player_paddle: Point2 { x: -380.0, y: 33.0 },
+            opponent_paddle: Point2 { x: 380.0, y: -22.0 },
+            player_score: 2,
+            opponent_score: 3,
+            match_over: false,
+            ball_speed_mult: 1.5,
+        };
+        let state = SimState::new(Some(seed));
+        assert_eq!(state.player_paddle, Vec2::new(-380.0, -22.0));
+        assert_eq!(state.opponent_paddle, Vec2::new(380.0, 33.0));
+        assert_eq!(state.opponent_target_y, 33.0);
+        assert_eq!(state.score_player, 3);
+        assert_eq!(state.score_opponent, 2);
+        assert_eq!(state.seq, 5);
+        assert_eq!(state.ball_speed_mult, 1.5);
+    }
+
+    #[test]
+    fn run_sim_applies_commands_publishes_and_exits_on_disconnect() {
+        let (command_tx, command_rx) = std::sync::mpsc::channel::<SimCommand>();
+        let (net_tx, _net_rx) = tokio::sync::mpsc::unbounded_channel::<NetCommand>();
+        let output = Arc::new(Mutex::new(SimOutput::new()));
+        let thread_output = output.clone();
+        let peer = test_peer();
+
+        let handle = std::thread::spawn(move || {
+            run_sim(command_rx, peer, net_tx, thread_output, None);
+        });
+
+        command_tx
+            .send(SimCommand::SetPlayerVelocity(PADDLE_SPEED))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+        command_tx.send(SimCommand::SetPlayerVelocity(0.0)).unwrap();
+        drop(command_tx);
+
+        handle.join().expect("sim thread exits on channel close");
+
+        let out = output.lock().unwrap();
+        assert_eq!(out.score_player, 0);
+        assert_eq!(out.score_opponent, 0);
+        assert!(!out.match_over);
+        assert_eq!(out.player_paddle.x, -FIELD_SIZE.x / 2.0 + EDGE);
     }
 }

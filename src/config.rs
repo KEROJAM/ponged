@@ -49,7 +49,11 @@ impl Default for Config {
 impl Config {
     /// Load the configuration from the database, falling back to defaults.
     pub fn load() -> Self {
-        let conn = match Connection::open(config_path()) {
+        Self::load_from(&config_path())
+    }
+
+    fn load_from(path: &str) -> Self {
+        let conn = match Connection::open(path) {
             Ok(c) => c,
             Err(_) => return Config::default(),
         };
@@ -88,7 +92,11 @@ impl Config {
 
     /// Persist the current configuration to the database.
     pub fn save(&self) {
-        let conn = match Connection::open(config_path()) {
+        self.save_to(&config_path());
+    }
+
+    fn save_to(&self, path: &str) {
+        let conn = match Connection::open(path) {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -150,6 +158,13 @@ pub fn load_config(mut commands: Commands) {
 mod tests {
     use super::*;
 
+    fn temp_db_path(name: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("ponged-config-test-{name}.sqlite"))
+            .to_string_lossy()
+            .to_string()
+    }
+
     #[test]
     fn test_key_code_roundtrip() {
         assert_eq!(key_code_to_str(KeyCode::ArrowUp), "ArrowUp");
@@ -164,6 +179,107 @@ mod tests {
         assert_eq!(cfg.key_up, KeyCode::ArrowUp);
         assert_eq!(cfg.key_down, KeyCode::ArrowDown);
         assert_eq!(cfg.paddle_speed, 5.0);
-        assert_eq!(cfg.vsync, true);
+        assert_eq!(cfg.window_scale, 1.0);
+        assert!(cfg.vsync);
+    }
+
+    #[test]
+    fn unknown_key_code_falls_back_to_arrow_up() {
+        assert_eq!(key_code_from_str("KeyQ"), KeyCode::ArrowUp);
+        assert_eq!(key_code_to_str(KeyCode::Escape), "ArrowUp");
+    }
+
+    #[test]
+    fn load_from_missing_db_returns_defaults() {
+        let cfg = Config::load_from("/nonexistent/ponged/config.sqlite");
+        assert_eq!(cfg.key_up, KeyCode::ArrowUp);
+        assert_eq!(cfg.paddle_speed, 5.0);
+        assert_eq!(cfg.window_scale, 1.0);
+        assert!(cfg.vsync);
+    }
+
+    #[test]
+    fn missing_values_fall_back_to_defaults() {
+        let path = temp_db_path("empty");
+        let _ = std::fs::remove_file(&path);
+
+        let conn = Connection::open(&path).expect("open test db");
+        conn.execute_batch("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("create empty table");
+        drop(conn);
+
+        let cfg = Config::load_from(&path);
+        assert!(cfg.vsync);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_then_load_roundtrips_all_fields() {
+        let path = temp_db_path("roundtrip");
+        let _ = std::fs::remove_file(&path);
+
+        let mut cfg = Config::default();
+        cfg.key_up = KeyCode::KeyW;
+        cfg.key_down = KeyCode::KeyS;
+        cfg.paddle_speed = 7.5;
+        cfg.window_scale = 1.5;
+        cfg.vsync = false;
+        cfg.save_to(&path);
+
+        let loaded = Config::load_from(&path);
+        assert_eq!(loaded.key_up, KeyCode::KeyW);
+        assert_eq!(loaded.key_down, KeyCode::KeyS);
+        assert_eq!(loaded.paddle_speed, 7.5);
+        assert_eq!(loaded.window_scale, 1.5);
+        assert!(!loaded.vsync);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_uses_stored_values_over_defaults() {
+        let path = temp_db_path("stored");
+        let _ = std::fs::remove_file(&path);
+
+        let conn = Connection::open(&path).expect("open test db");
+        conn.execute_batch(
+            "CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO config (key, value) VALUES ('key_up', 'KeyS');
+             INSERT INTO config (key, value) VALUES ('paddle_speed', '3');
+             INSERT INTO config (key, value) VALUES ('vsync', 'false');",
+        )
+        .expect("seed test db");
+        drop(conn);
+
+        let cfg = Config::load_from(&path);
+        assert_eq!(cfg.key_down, KeyCode::ArrowDown);
+        assert_eq!(cfg.key_up, KeyCode::KeyS);
+        assert_eq!(cfg.paddle_speed, 3.0);
+        assert_eq!(cfg.window_scale, 1.0);
+        assert!(!cfg.vsync);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unparseable_stored_values_fallback_to_defaults() {
+        let path = temp_db_path("garbage");
+        let _ = std::fs::remove_file(&path);
+
+        let conn = Connection::open(&path).expect("open test db");
+        conn.execute_batch(
+            "CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO config (key, value) VALUES ('paddle_speed', 'not-a-number');
+             INSERT INTO config (key, value) VALUES ('window_scale', 'oops');",
+        )
+        .expect("seed test db");
+        drop(conn);
+
+        let cfg = Config::load_from(&path);
+        assert_eq!(cfg.paddle_speed, 5.0);
+        assert_eq!(cfg.window_scale, 1.0);
+        assert!(cfg.vsync);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

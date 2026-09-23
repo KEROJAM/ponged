@@ -3151,3 +3151,269 @@ mod addresses_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_db_path() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("pong-test-http-{nonce}.sqlite"))
+    }
+
+    /// A channel whose consumer answers every `HttpCmd` immediately, so the
+    /// 5 s timeout in `http_ask` is never hit during routing tests.
+    fn ack_channel() -> UnboundedSender<HttpCmd> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                while let Some(cmd) = rx.recv().await {
+                    match cmd {
+                        HttpCmd::List(resp) => {
+                            let _ = resp.send(Ok("{\"matches\":[]}".into()));
+                        }
+                        HttpCmd::Revoke { resp, .. } => {
+                            let _ = resp.send(Ok("{\"ok\":true}".into()));
+                        }
+                        HttpCmd::Edit { resp, .. } => {
+                            let _ = resp.send(Ok("{\"ok\":true}".into()));
+                        }
+                    }
+                }
+            });
+        });
+        tx
+    }
+
+    fn admin_auth(db: &Path) -> Arc<Auth> {
+        let conn = db_open(db).unwrap();
+        init_schema(&conn).unwrap();
+        set_moderator(&conn, "boss", "s3cret", ModRole::Admin).unwrap();
+        drop(conn);
+        let auth = Auth::new();
+        assert!(auth.login(db, "boss", "s3cret").is_some());
+        auth
+    }
+
+    #[test]
+    fn session_token_is_64_hex_chars() {
+        let a = session_token();
+        let b = session_token();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn cookie_helpers_build_sane_headers() {
+        let set = set_cookie_header("tok123");
+        assert!(set.starts_with("pong_mod=tok123;"));
+        assert!(set.contains("HttpOnly"));
+        assert!(set.contains("SameSite=Strict"));
+        assert!(set.contains(&format!("Max-Age={SESSION_MAX_AGE_SECS}")));
+        let clear = clear_cookie_header();
+        assert!(clear.starts_with("pong_mod=;"));
+        assert!(clear.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn http_resp_constructors_set_status_and_type() {
+        let html = HttpResp::html(200, "<b>hi</b>".into());
+        assert_eq!((html.status, html.body), (200, "<b>hi</b>".to_string()));
+        assert_eq!(html.content_type, "text/html; charset=utf-8");
+        let json = HttpResp::json(403, "{}".into());
+        assert_eq!((json.status, json.content_type), (403, "application/json; charset=utf-8"));
+        let redir = HttpResp::redirect("/login");
+        assert_eq!(redir.status, 302);
+        assert_eq!(redir.headers[0], ("Location".to_string(), "/login".to_string()));
+    }
+
+    #[test]
+    fn err_json_wraps_message() {
+        let v: serde_json::Value = serde_json::from_str(&err_json("algo salió mal")).unwrap();
+        assert_eq!(v["ok"], serde_json::Value::Bool(false));
+        assert_eq!(v["error"], "algo salió mal");
+    }
+
+    #[test]
+    fn login_page_shows_error_only_when_requested() {
+        assert!(!login_page(false).contains("Usuario o contraseña incorrectos"));
+        assert!(login_page(true).contains("Usuario o contraseña incorrectos"));
+        assert!(login_page(false).contains("PONG GATEWAY · Moderación"));
+    }
+
+    #[test]
+    fn monitor_page_embeds_admin_section_only_for_admins() {
+        let as_admin = monitor_page("boss", true);
+        assert!(as_admin.contains("boss · <b>admin</b>"));
+        assert!(as_admin.contains("Cuentas de moderador"));
+        assert!(as_admin.contains("modRows"));
+        let as_user = monitor_page("peon", false);
+        assert!(as_user.contains("peon · user"));
+        assert!(!as_user.contains("Cuentas de moderador"));
+    }
+
+    #[test]
+    fn db_and_http_helpers_create_and_list_moderators() {
+        let db = tmp_db_path();
+        let conn = db_open(&db).unwrap();
+        init_schema(&conn).unwrap();
+        drop(conn);
+        add_moderator_http(&db, "aLicia", "pw", ModRole::Admin).unwrap();
+        add_moderator_http(&db, "bob", "pw2", ModRole::User).unwrap();
+        let body = moderator_list_json(&db).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], serde_json::Value::Bool(true));
+        let rows = v["moderators"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|r| r["username"] == "alicia" && r["role"] == "admin"));
+        assert!(rows.iter().any(|r| r["username"] == "bob" && r["role"] == "user"));
+        // A second add is an upsert: still 2 accounts.
+        add_moderator_http(&db, "alicia", "pw3", ModRole::Admin).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&moderator_list_json(&db).unwrap()).unwrap();
+        assert_eq!(v["moderators"].as_array().unwrap().len(), 2);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn route_requires_login_for_every_page() {
+        let db = tmp_db_path();
+        let auth = Auth::new();
+        let tx = ack_channel();
+        // Anonymous: every page redirects to /login or answers 401/403.
+        let resp = route_request("GET", "/", None, "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 302);
+        assert_eq!(resp.headers[0].1, "/login");
+        let resp = route_request("GET", "/login", None, "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 200);
+        let resp = route_request("GET", "/api/matches", None, "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 401);
+        let resp = route_request("GET", "/api/moderators", None, "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 403);
+        let resp = route_request("POST", "/api/moderators", None, "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 403);
+        let resp = route_request("POST", "/api/moderators/x/role", None, "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 403);
+        let resp = route_request("POST", "/api/moderators/x/delete", None, "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 403);
+        let resp = route_request("POST", "/nope", None, "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 401);
+        let resp = route_request("GET", "/nope", None, "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 404);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn route_login_flow_issues_and_clears_session() {
+        let db = tmp_db_path();
+        let auth = admin_auth(&db);
+        let tx = ack_channel();
+        // Bad POST /login redirects back to the error query.
+        let resp = route_request("POST", "/login", None, "username=boss&password=nope", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 302);
+        assert_eq!(resp.headers[0].1, "/login?error=1");
+        // Good POST /login sets the pong_mod cookie and redirects home.
+        let resp = route_request("POST", "/login", None, "username=boss&password=s3cret", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 302);
+        assert_eq!(resp.headers[0].1, "/");
+        let cookie = resp.headers.iter().find(|(n, _)| n == "Set-Cookie").unwrap().1.clone();
+        assert!(cookie.starts_with("pong_mod="));
+        let token = cookie_token(&cookie).unwrap();
+        assert!(auth.who(Some(token.clone())).is_some());
+        // GET /login while logged in redirects home.
+        let resp = route_request("GET", "/login", Some(token.clone()), "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 302);
+        // GET / while logged in renders the monitor page.
+        let resp = route_request("GET", "/", Some(token.clone()), "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 200);
+        assert!(resp.body.contains("admin"));
+        // GET /logout clears the cookie: header says Max-Age=0.
+        let resp = route_request("GET", "/logout", Some(token.clone()), "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 302);
+        assert!(resp.headers.iter().any(|(n, v)| n == "Set-Cookie" && v.contains("Max-Age=0")));
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn route_admin_ops_require_admin_and_validate_input() {
+        let db = tmp_db_path();
+        let auth = Auth::new();
+        let conn = db_open(&db).unwrap();
+        init_schema(&conn).unwrap();
+        set_moderator(&conn, "boss", "s3cret", ModRole::Admin).unwrap();
+        set_moderator(&conn, "peon", "pw", ModRole::User).unwrap();
+        drop(conn);
+        let tx = ack_channel();
+        let peer_token = auth.login(&db, "peon", "pw").unwrap();
+        // A user (non-admin) is rejected with 403 on every admin endpoint.
+        let resp = route_request("GET", "/api/moderators", Some(peer_token.clone()), "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 403);
+        let resp = route_request("POST", "/api/moderators", Some(peer_token.clone()), "username=x&password=y", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 403);
+        let resp = route_request("POST", "/api/moderators/alicia/role", Some(peer_token.clone()), "role=admin", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 403);
+        let resp = route_request("POST", "/api/moderators/alicia/delete", Some(peer_token.clone()), "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 403);
+        // Admin creates a moderator.
+        let admin_token = auth.login(&db, "boss", "s3cret").unwrap();
+        let resp = route_request("POST", "/api/moderators", Some(admin_token.clone()), "username=alicia&password=apw&role=admin", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 200);
+        // ... but an invalid role value is bounced with 400.
+        let resp = route_request("POST", "/api/moderators/alicia/role", Some(admin_token.clone()), "role=root", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 400);
+        // Valid role change + delete round-trip.
+        let resp = route_request("POST", "/api/moderators/alicia/role", Some(admin_token.clone()), "role=user", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 200);
+        assert_eq!(moderator_role(&Connection::open(&db).unwrap(), "alicia"), Some(ModRole::User));
+        let resp = route_request("POST", "/api/moderators/alicia/delete", Some(admin_token.clone()), "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 200);
+        assert!(moderator_role(&Connection::open(&db).unwrap(), "alicia").is_none());
+        // Listing as admin is 200.
+        let resp = route_request("GET", "/api/moderators", Some(admin_token.clone()), "", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 200);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn route_score_edit_validates_oversized_before_backend() {
+        let db = tmp_db_path();
+        let auth = admin_auth(&db);
+        let tx = ack_channel();
+        let token = auth.login(&db, "boss", "s3cret").unwrap();
+        let resp = route_request(
+            "POST",
+            "/api/matches/1/score",
+            Some(token.clone()),
+            "score_a=99&score_b=3",
+            &db,
+            &auth,
+            &tx,
+        )
+        .await;
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("marcador inválido"));
+        // A valid score reaches the backend (ack channel answers 200).
+        let resp = route_request(
+            "POST",
+            "/api/matches/1/score",
+            Some(token.clone()),
+            "score_a=5&score_b=3",
+            &db,
+            &auth,
+            &tx,
+        )
+        .await;
+        assert_eq!(resp.status, 200);
+        // A path that is neither a score nor a revoke → 404.
+        let resp = route_request("POST", "/api/matches/1/score", Some(token), "nada", &db, &auth, &tx).await;
+        assert_eq!(resp.status, 400);
+        std::fs::remove_file(&db).ok();
+    }
+}
