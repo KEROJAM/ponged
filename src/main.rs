@@ -661,7 +661,11 @@ fn main() {
             (
                 cleanup_playing,
                 sim::stop_match_sim.run_if(resource_equals(networking_demo::IsHost(true))),
-                history::record_match,
+                // `on_exit_playing` consumes the `Opponent` and resets
+                // `ActiveMatch`; the match must be recorded (and its result
+                // reported to the gateway) before that happens. The ordering
+                // is not implied by Bevy's scheduler, so it must be explicit.
+                history::record_match.before(menu::on_exit_playing),
                 menu::on_exit_playing,
             ),
         )
