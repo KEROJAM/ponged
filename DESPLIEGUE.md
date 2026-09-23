@@ -1,6 +1,6 @@
-# Despliegue en AWS — Pong 2D P2P (pong-gateway)
+# Despliegue en AWS — Pong 2D P2P (ponged-gateway)
 
-Guía para correr el `pong-gateway` en AWS como **relay + rendezvous +
+Guía para correr el `ponged-gateway` en AWS como **relay + rendezvous +
 matchmaking** para partidas WAN. El gateway es un solo binario headless
 (`src/bin/gateway.rs`, M6) que:
 
@@ -12,7 +12,7 @@ matchmaking** para partidas WAN. El gateway es un solo binario headless
 El **cliente** se conecta con la variable `PONG_GATEWAY`:
 
 ```bash
-PONG_GATEWAY=/ip4/<IP_PUBLICA>/tcp/4001 nix develop -c cargo run --bin ponged
+PONG_GATEWAY=/ip4/<IP_PUBLICA>/tcp/4001 nix develop -c cargo run --bin ponged-cliente
 ```
 
 ---
@@ -30,15 +30,15 @@ PONG_GATEWAY=/ip4/<IP_PUBLICA>/tcp/4001 nix develop -c cargo run --bin ponged
 ### 1. Build y push de la imagen
 
 ```bash
-docker build -t pong-gateway .
+docker build -t ponged-gateway .
 
 # ECR
-aws ecr create-repository --repository-name pong-gateway
+aws ecr create-repository --repository-name ponged-gateway
 aws ecr get-login-password | docker login --username AWS --password-stdin \
   <aws_account>.dkr.ecr.<region>.amazonaws.com
 
-docker tag pong-gateway <aws_account>.dkr.ecr.<region>.amazonaws.com/pong-gateway:latest
-docker push <aws_account>.dkr.ecr.<region>.amazonaws.com/pong-gateway:latest
+docker tag ponged-gateway <aws_account>.dkr.ecr.<region>.amazonaws.com/ponged-gateway:latest
+docker push <aws_account>.dkr.ecr.<region>.amazonaws.com/ponged-gateway:latest
 ```
 
 ### 2. EC2
@@ -52,10 +52,10 @@ docker push <aws_account>.dkr.ecr.<region>.amazonaws.com/pong-gateway:latest
 
 ```bash
 docker run -d --restart=unless-stopped \
-  --name pong-gateway \
+  --name ponged-gateway \
   -p 4001:4001 \
   -v pong-data:/data \
-  <aws_account>.dkr.ecr.<region>.amazonaws.com/pong-gateway:latest \
+  <aws_account>.dkr.ecr.<region>.amazonaws.com/ponged-gateway:latest \
   --listen /ip4/0.0.0.0/tcp/4001 --public <EIP_ELASTICA>
 ```
 
@@ -68,21 +68,21 @@ docker run -d --restart=unless-stopped \
 ### 4. Clientes conectan
 
 ```bash
-PONG_GATEWAY=/ip4/<EIP_ELASTICA>/tcp/4001 nix develop -c cargo run --bin ponged
+PONG_GATEWAY=/ip4/<EIP_ELASTICA>/tcp/4001 nix develop -c cargo run --bin ponged-cliente
 ```
 
 ---
 
 ## Opción 2 — NixOS en EC2 (módulo del flake)
 
-El flake trae `nixosModules.pong-gateway` (servicio systemd).
+El flake trae `nixosModules.ponged-gateway` (servicio systemd).
 
 ### Opciones del módulo
 
 | Opción                        | Default                          | Descripción                    |
 |-------------------------------|----------------------------------|--------------------------------|
-| `services.pong-gateway.enable` | `false`                          | Activa el servicio            |
-| `... .package`                 | `pkgs.pong-gateway`              | Paquete a usar                |
+| `services.ponged-gateway.enable` | `false`                          | Activa el servicio            |
+| `... .package`                 | `pkgs.ponged-gateway`              | Paquete a usar                |
 | `... .listen`                  | `/ip4/0.0.0.0/tcp/4001`          | Multiaddr de escucha          |
 | `... .public`                  | `127.0.0.1`                      | Host/IP pública para relay    |
 | `... .openFirewall`            | `false`                          | Abre TCP 4001 firewall        |
@@ -102,9 +102,9 @@ El flake trae `nixosModules.pong-gateway` (servicio systemd).
     nixosConfigurations.prod = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
-        pong.nixosModules.pong-gateway
+        pong.nixosModules.ponged-gateway
         ({ config, ... }: {
-          services.pong-gateway = {
+          services.ponged-gateway = {
             enable = true;
             public = "54.xxx.xxx.xxx";   # Elastic IP
             openFirewall = true;
@@ -124,20 +124,20 @@ nixos-rebuild switch --flake .#prod --target-host root@<EIP>
 ```
 
 El servicio queda con `Restart=on-failure`, `DynamicUser` y
-`StateDirectory=/var/lib/pong-gateway` (persisten `gateway.key` +
+`StateDirectory=/var/lib/ponged-gateway` (persisten `gateway.key` +
 `gateway.sqlite`).
 
 ### Nota (bug actual del módulo)
 
 `ExecStart` no pasa `--db`/`--key` ni systemd fija `WorkingDirectory`, por lo
 que con `DynamicUser` el proceso intentaría escribir en `/` en vez de
-`/var/lib/pong-gateway`. Fix necesario en `flake.nix`:
+`/var/lib/ponged-gateway`. Fix necesario en `flake.nix`:
 
 ```nix
 serviceConfig = {
   ExecStart = ...;
-  WorkingDirectory = "/var/lib/pong-gateway";
-  StateDirectory = "pong-gateway";
+  WorkingDirectory = "/var/lib/ponged-gateway";
+  StateDirectory = "ponged-gateway";
   DynamicUser = true;
   Restart = "on-failure";
   RestartSec = 5;
@@ -148,27 +148,27 @@ serviceConfig = {
 
 ## Opción 3 — Binario estático en cualquier instancia
 
-El flake compila `pong-gateway` **estático musl** (sin dependencias de sistema).
+El flake compila `ponged-gateway` **estático musl** (sin dependencias de sistema).
 
 ```bash
 # máquina local
-nix build .#pong-gateway --no-link --print-out-paths
-scp result/bin/pong-gateway ec2-user@<ip>:/usr/local/bin/
+nix build .#ponged-gateway --no-link --print-out-paths
+scp result/bin/ponged-gateway ec2-user@<ip>:/usr/local/bin/
 ```
 
 En la instancia (sin NixOS, cualquier Linux con Nix no hace falta nada más),
 un servicio systemd simple:
 
 ```ini
-# /etc/systemd/system/pong-gateway.service
+# /etc/systemd/system/ponged-gateway.service
 [Unit]
 Description=Pong P2P Matchmaking Gateway
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/pong-gateway \
+ExecStart=/usr/local/bin/ponged-gateway \
   --listen /ip4/0.0.0.0/tcp/4001 --public 54.xxx.xxx.xxx
-WorkingDirectory=/var/lib/pong-gateway
+WorkingDirectory=/var/lib/ponged-gateway
 Restart=on-failure
 RestartSec=5
 
@@ -177,8 +177,8 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-sudo mkdir -p /var/lib/pong-gateway
-sudo systemctl daemon-reload && sudo systemctl enable --now pong-gateway
+sudo mkdir -p /var/lib/ponged-gateway
+sudo systemctl daemon-reload && sudo systemctl enable --now ponged-gateway
 ```
 
 Abrir **TCP 4001** en el Security Group.
@@ -207,20 +207,20 @@ nix run .#installSystemd
 
 Ese script:
 
-1. Copia `pong-gateway` (estático, sin dependencias) a `/usr/local/bin/`.
-2. Genera el unit `/etc/systemd/system/pong-gateway.service` con:
-   - `EnvironmentFile=/etc/pong-gateway.env` → lee la IP pública.
-   - `StateDirectory=pong-gateway` → crea `/var/lib/pong-gateway`
+1. Copia `ponged-gateway` (estático, sin dependencias) a `/usr/local/bin/`.
+2. Genera el unit `/etc/systemd/system/ponged-gateway.service` con:
+   - `EnvironmentFile=/etc/ponged-gateway.env` → lee la IP pública.
+   - `StateDirectory=ponged-gateway` → crea `/var/lib/ponged-gateway`
      para persistir `gateway.key` + `gateway.sqlite`.
    - `Restart=on-failure`, `RestartSec=5`.
-3. Crea `/etc/pong-gateway.env` la primera vez.
-4. `systemctl daemon-reload && systemctl enable --now pong-gateway`.
+3. Crea `/etc/ponged-gateway.env` la primera vez.
+4. `systemctl daemon-reload && systemctl enable --now ponged-gateway`.
 
 ### Configurar la IP pública
 
 ```bash
-sudo -E vim /etc/pong-gateway.env   # PONG_PUBLIC=<EIP_ELASTICA>
-sudo systemctl restart pong-gateway
+sudo -E vim /etc/ponged-gateway.env   # PONG_PUBLIC=<EIP_ELASTICA>
+sudo systemctl restart ponged-gateway
 ```
 
 Al quedar la IP en un archivo separado, si cambia la Elastic IP solo se
@@ -229,14 +229,14 @@ edita el `.env` y se reinicia — **no hay que regenerar nada**.
 ### Chequear
 
 ```bash
-systemctl status pong-gateway
-journalctl -u pong-gateway -f
+systemctl status ponged-gateway
+journalctl -u ponged-gateway -f
 ```
 
 Abrir **TCP 4001** en el Security Group y probar con:
 
 ```bash
-PONG_GATEWAY=/ip4/<EIP_ELASTICA>/tcp/4001 nix develop -c cargo run --bin ponged
+PONG_GATEWAY=/ip4/<EIP_ELASTICA>/tcp/4001 nix develop -c cargo run --bin ponged-cliente
 ```
 
 ---

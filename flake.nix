@@ -82,14 +82,14 @@
     };
 
     # ── Game client binary (Bevy + Vulkan, glibc dinámico) ──────────
-    packages."x86_64-linux".ponged = pkgs.rustPlatform.buildRustPackage {
-      pname = "ponged";
+    packages."x86_64-linux".ponged-cliente = pkgs.rustPlatform.buildRustPackage {
+      pname = "ponged-cliente";
       version = "0.1.1";
       src = ./.;
       cargoLock.lockFile = ./Cargo.lock;
       nativeBuildInputs = [pkgs.pkg-config pkgs.perl];
       buildInputs = clientLibs;
-      cargoBuildFlags = ["--bin" "ponged"];
+      cargoBuildFlags = ["--bin" "ponged-cliente"];
     };
 
     # ── Docker image (gateway only, minimal) ────────────────────────

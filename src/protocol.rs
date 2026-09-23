@@ -8,7 +8,7 @@ pub const GATEWAY_PROTOCOL: StreamProtocol = StreamProtocol::new("/pong/matchmak
 
 /// Agent version the gateway advertises over `identify`. The client uses it to
 /// recognise the peer it dialed as the matchmaking server.
-pub const GATEWAY_AGENT_VERSION: &str = "pong-gateway/1.0.0";
+pub const GATEWAY_AGENT_VERSION: &str = "ponged-gateway/1.0.0";
 
 /// A position on the playing field. Plain `f32` pairs so game state can
 /// cross the wire without needing Bevy's serde support.

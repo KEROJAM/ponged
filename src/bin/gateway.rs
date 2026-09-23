@@ -1,4 +1,4 @@
-//! `pong-gateway` — the matchmaking + connectivity gateway for the game (M6).
+//! `ponged-gateway` — the matchmaking + connectivity gateway for the game (M6).
 //!
 //! A headless libp2p node that provides:
 //!   * **Relay** (circuit-relay v2): NAT-traversed connectivity for clients
@@ -30,13 +30,13 @@
 //!
 //! Usage:
 //! ```text
-//! pong-gateway [--listen /ip4/0.0.0.0/tcp/4001]
+//! ponged-gateway [--listen /ip4/0.0.0.0/tcp/4001]
 //!              [--public HOST_OR_IP]        # advertise this host in relay addr
 //!              [--db gateway.sqlite]
 //!              [--key gateway.key]
 //!              [--http PORT]                # monitor + moderación page
-//! pong-gateway --add-moderator <user>       # create/reset a moderator account
-//! pong-gateway --remove-moderator <user>    # delete a moderator account
+//! ponged-gateway --add-moderator <user>       # create/reset a moderator account
+//! ponged-gateway --remove-moderator <user>    # delete a moderator account
 //! ```
 //!
 //! The gateway's own `PeerId` is printed at startup; players connect to it
@@ -94,12 +94,12 @@ const SESSION_MAX_AGE_SECS: u64 = 8 * 3600;
 /// Cookie that holds the moderator session token.
 const COOKIE_NAME: &str = "pong_mod";
 const USAGE: &str = "\
-pong-gateway — matchmaking + relay gateway for the P2P pong game
+ponged-gateway — matchmaking + relay gateway for the P2P pong game
 
 USAGE:
-    pong-gateway [OPTIONS]
-    pong-gateway --add-moderator <user>
-    pong-gateway --remove-moderator <user>
+    ponged-gateway [OPTIONS]
+    ponged-gateway --add-moderator <user>
+    ponged-gateway --remove-moderator <user>
 
 OPTIONS:
     --listen <multiaddr>   Address to listen on   [default: /ip4/0.0.0.0/tcp/4001]
@@ -250,7 +250,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let keypair = load_or_create_key(&key_path)?;
     let gateway_peer = keypair.public().to_peer_id();
 
-    println!("pong-gateway starting");
+    println!("ponged-gateway starting");
     println!("  peer id : {gateway_peer}");
     println!("  identity: {key_path:?}");
     println!("  db      : {db_path:?} (SQLite ratings)");

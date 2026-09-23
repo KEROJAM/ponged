@@ -65,8 +65,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist
-          cargo build --release --bin ponged
-          install -m 0755 target/release/ponged dist/ponged-linux-x86_64
+          cargo build --release --bin ponged-cliente
+          install -m 0755 target/release/ponged-cliente dist/ponged-cliente-linux-x86_64
           cp -r assets dist/assets
 
       # Windows: toolchain GNU target (x86_64-pc-windows-gnu). Un binario GNU
@@ -87,13 +87,13 @@ jobs:
 
       - name: Compilar cliente y servidor en release (Windows)
         if: runner.os == 'Windows'
-        run: cargo build --release --target ${{ matrix.target }} --bin ponged --bin ponged-gateway
+        run: cargo build --release --target ${{ matrix.target }} --bin ponged-cliente --bin ponged-gateway
 
       - name: Empaquetar binarios (Windows)
         if: runner.os == 'Windows'
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/ponged.exe dist/ponged-windows-x86_64.exe
+          cp target/${{ matrix.target }}/release/ponged-cliente.exe dist/ponged-cliente-windows-x86_64.exe
           cp target/${{ matrix.target }}/release/ponged-gateway.exe dist/pong-servidor-windows-x86_64.exe
           xcopy /E /I assets dist\assets
 

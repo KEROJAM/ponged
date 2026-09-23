@@ -8,11 +8,11 @@ name = "ponged"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ponged"
+name = "ponged-cliente"
 path = "src/main.rs"
 
 [[bin]]
-name = "pong-gateway"
+name = "ponged-gateway"
 path = "src/bin/gateway.rs"
 
 [profile.dev]

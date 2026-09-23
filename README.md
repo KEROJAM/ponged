@@ -13,7 +13,7 @@ rendezvous, Kademlia, relay, DCUtR) · **Nix flakes** (entorno reproducible) ·
 
 ```
 ┌─────────────────────────────────────────────┐
-│  pong-gateway — servidor headless            │
+│  ponged-gateway — servidor headless            │
 │  ├─ relay (circuit-relay v2: NAT)            │
 │  ├─ rendezvous server (peer discovery)       │
 │  ├─ Kademlia DHT server (bootstrap)          │
@@ -71,15 +71,15 @@ nuevos):
 nix develop -c cargo build --bins
 
 # Prueba de humo: lanza el gateway en localhost
-nix develop -c cargo run --bin pong-gateway -- --listen /ip4/127.0.0.1/tcp/4001
+nix develop -c cargo run --bin ponged-gateway -- --listen /ip4/127.0.0.1/tcp/4001
 
 # Cliente (otra terminal)
-nix develop -c cargo run --bin ponged
+nix develop -c cargo run --bin ponged-cliente
 ```
 
 El cliente Bevy soporta **Wayland y X11** (winit elige el backend disponible:
 X11/XWayland entra también cuando `XDG_SESSION_TYPE=wayland`). Para forzar uno
-en concreto: `WINIT_UNIX_BACKEND=x11 nix develop -c cargo run --bin ponged`.
+en concreto: `WINIT_UNIX_BACKEND=x11 nix develop -c cargo run --bin ponged-cliente`.
 
 En el menú: **Connect to gateway** → regístrate solo → **Join WAN queue**
 (o challa peers de la LAN que aparece en la lista). El PeerId del gateway se
@@ -87,23 +87,23 @@ imprime al arrancarlo; si no es localhost, pasa la dirección con
 `PONG_GATEWAY`:
 
 ```bash
-PONG_GATEWAY=/ip4/<ip-del-gateway>/tcp/4001 nix develop -c cargo run --bin ponged
+PONG_GATEWAY=/ip4/<ip-del-gateway>/tcp/4001 nix develop -c cargo run --bin ponged-cliente
 ```
 
 ## Build de release / binarios
 
 ```bash
 # Gateway: musl 100% estático (lo usa el release.yml de GitHub Actions)
-nix build .#pong-gateway --no-link --print-out-paths
+nix build .#ponged-gateway --no-link --print-out-paths
 # Cliente: glibc dinámico (winit requiere dlopen de xkbcommon/wayland/X11)
-nix build .#pong-client --no-link --print-out-paths
+nix build .#ponged-cliente --no-link --print-out-paths
 ```
 
 ## Correr el cliente por plataforma
 
 ### Linux
 
-El cliente `pong-client` se enlaza **dinámicamente contra glibc**: usa las
+El cliente `ponged-cliente` se enlaza **dinámicamente contra glibc**: usa las
 bibliotecas del sistema para Wayland/X11, teclado (`libxkbcommon`), udev, ALSA
 y Vulkan. **SQLCipher y OpenSSL van compiladas *dentro* del binario** (feature
 `bundled-sqlcipher-vendored-openssl` de rusqlite): no se instala sqlite ni
@@ -111,10 +111,10 @@ openssl en ningún sitio.
 
 - **Con Nix (recomendado)** — todo lo resuelve el store, no instales nada:
   ```bash
-  nix build .#pong-client
-  ./result/bin/ponged
+  nix build .#ponged-cliente
+  ./result/bin/ponged-cliente
   ```
-  (en modo dev: `nix develop -c cargo run --bin ponged`).
+  (en modo dev: `nix develop -c cargo run --bin ponged-cliente`).
 
 - **En otras distros**, el binario necesita en *runtime*: driver + loader de
   Vulkan, una sesión Wayland o X11, `libxkbcommon`, `libudev`, ALSA y `libssl`.
@@ -143,7 +143,7 @@ Requisitos:
 - GPU con driver **DirectX 12** o Vulkan.
 
 ```bat
-cargo run --release --bin ponged
+cargo run --release --bin ponged-cliente
 ```
 
 En Windows el backend de winit es nativo (no Wayland/X11) y la config de red
@@ -152,9 +152,9 @@ funciona igual: `PONG_GATEWAY` y `assets/gateways.json`.
 ## Docker (gateway)
 
 ```bash
-docker build -t pong-gateway .
+docker build -t ponged-gateway .
 mkdir -p data
-docker run -p 4001:4001 -v "$PWD/data:/data" pong-gateway \
+docker run -p 4001:4001 -v "$PWD/data:/data" ponged-gateway \
   --listen /ip4/0.0.0.0/tcp/4001 --public <HOST_OR_IP>
 ```
 
@@ -190,7 +190,7 @@ iniciar el cliente y se re-evalúan cada 30 segundos.
 
 > Alternativamente, usa la variable de entorno `PONG_GATEWAY`:
 > ```bash
-> PONG_GATEWAY=/ip4/1.2.3.4/tcp/4001,/ip4/5.6.7.8/tcp/4001 nix develop -c cargo run --bin ponged
+> PONG_GATEWAY=/ip4/1.2.3.4/tcp/4001,/ip4/5.6.7.8/tcp/4001 nix develop -c cargo run --bin ponged-cliente
 > ```
 
 ## Sala de partidas / despliegue en WAN
