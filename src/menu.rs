@@ -1560,6 +1560,7 @@ pub fn despawn_menu(
             With<OnboardingRoot>,
             With<PreMatchRoot>,
             With<ChatRoot>,
+            With<ChatReopenButton>,
             With<MenuField>,
             With<NodeHub>,
             With<NodeHubLabel>,
@@ -2358,8 +2359,12 @@ pub fn update_chat(
     gateway: Res<GatewayState>,
     channels: Res<NetChannels>,
     mut chat_input: Single<&mut EditableText, With<ChatInput>>,
-    mut chat_root: Single<&mut Node, (With<ChatRoot>, Without<ChatReopenButton>)>,
-    mut reopen_button: Single<&mut Node, (With<ChatReopenButton>, Without<ChatRoot>)>,
+    // `Option<Single>` instead of `Single`: a leaked duplicate (e.g. from a
+    // stale reopen button left over by a previous menu session) must never
+    // silently disable the whole chat again (Bevy skips the system when a
+    // `Single` has zero or multiple matches).
+    mut chat_root: Option<Single<&mut Node, (With<ChatRoot>, Without<ChatReopenButton>)>>,
+    mut reopen_button: Option<Single<&mut Node, (With<ChatReopenButton>, Without<ChatRoot>)>>,
     send_button: Query<Ref<Interaction>, With<ChatSendButton>>,
     chat_toggle: Query<Ref<Interaction>, With<ChatToggleButton>>,
     messages_container: Query<
@@ -2370,16 +2375,20 @@ pub fn update_chat(
     mut commands: Commands,
 ) {
     // Update chat panel visibility based on ChatOpen resource
-    chat_root.display = if chat_open.0 {
-        Display::Flex
-    } else {
-        Display::None
-    };
-    reopen_button.display = if chat_open.0 {
-        Display::None
-    } else {
-        Display::Flex
-    };
+    if let Some(chat_root) = chat_root.as_deref_mut() {
+        chat_root.display = if chat_open.0 {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    if let Some(reopen_button) = reopen_button.as_deref_mut() {
+        reopen_button.display = if chat_open.0 {
+            Display::None
+        } else {
+            Display::Flex
+        };
+    }
 
     // Handle chat toggle button
     for interaction in &chat_toggle {
@@ -3648,5 +3657,31 @@ fn opponent_relay_addr(gateway: &GatewayState, opponent: &PeerId) -> Option<Mult
     addr.push(Protocol::P2pCircuit);
     addr.push(Protocol::P2p(*opponent));
     Some(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn despawn_menu_removes_chat_reopen_button() {
+        // Regression: `ChatReopenButton` is a top-level sibling of `ChatRoot`,
+        // not a child, so it was leaking across menu sessions. A leftover
+        // duplicate made `update_chat`'s `Single` fail (silently skipped) and
+        // the chat became un-openable/un-sendable: `Single` with zero *or*
+        // multiple matches disables the whole system every frame.
+        let mut world = World::new();
+        world.spawn((ChatRoot, Node::default()));
+        world.spawn((ChatReopenButton, ChatToggleButton, Node::default()));
+
+        world.run_system_once(despawn_menu).unwrap();
+
+        let remaining = world
+            .query_filtered::<Entity, Or<(With<ChatRoot>, With<ChatReopenButton>)>>()
+            .iter(&world)
+            .count();
+        assert_eq!(remaining, 0, "menu cleanup must remove the chat reopen button");
+    }
 }
 
