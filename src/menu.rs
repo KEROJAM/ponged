@@ -89,6 +89,15 @@ pub struct ReconnectionState {
     pub countdown: Option<Timer>,
     /// Whether a reconnection attempt is in progress.
     pub active: bool,
+    /// The addresses we used to reach the opponent (the relayed circuit
+    /// address the gateway hands out in `MatchFound`). Re-dialed on a short
+    /// interval while a drop is being reconnected, instead of waiting on
+    /// libp2p's background reconnect whose exponential backoff can overshoot
+    /// the grace window.
+    pub addresses: Vec<Multiaddr>,
+    /// Seconds accumulated since the last re-dial attempt, paced by
+    /// [`REDIAL_EVERY_SECS`].
+    pub redial_accum: f32,
 }
 
 /// Latest update information fetched from the GitHub API.
@@ -271,8 +280,14 @@ const PREMATCH_RESUME_SECS: f32 = 8.0;
 /// How long we wait on a dropped opponent connection before abandoning a
 /// match. Relay circuits over NAT frequently blip for a second or two and then
 /// re-establish by themselves; abandoning instantly turns every such blip into
-/// a free (and unreportable) "result".
-const RECONNECT_GRACE_SECS: f32 = 5.0;
+/// a free (and unreportable) "result". We keep actively re-dialing the
+/// opponent (and re-arming the relay reservation) throughout the window, so
+/// even a slower recovery usually lands before it expires.
+const RECONNECT_GRACE_SECS: f32 = 10.0;
+
+/// How often `update_reconnection` re-dials the opponent's addresses while a
+/// drop is being reconnected.
+const REDIAL_EVERY_SECS: f32 = 2.0;
 
 /// A pending pairing that is waiting for both players to press "Aceptar" (M6).
 /// After a gateway `MatchFound` or a LAN `InviteToPlay` we show a dialog; the
@@ -1579,6 +1594,22 @@ pub fn on_identity(
     // Every gateway we meet is recorded so the menu never mistakes one for a
     // player. Only the first becomes the active gateway we queue on.
     gateway.known.insert(*peer);
+    if gateway.peer == Some(*peer) {
+        // Our active gateway (re)connected — e.g. a mid-match drop that the
+        // swarm re-established by itself. Restore the state and, if the relay
+        // reservation was lost meanwhile, ask for a fresh one so relayed
+        // circuits to us keep working.
+        gateway.connected = true;
+        if !gateway.reserved {
+            info!("Gateway {peer} reconnected; re-requesting relay reservation");
+            if let Some(mut addr) = gateway.base_addr() {
+                addr.push(Protocol::P2p(*peer));
+                addr.push(Protocol::P2pCircuit);
+                let _ = channels.commands.send(NetCommand::Listen(addr));
+            }
+        }
+        return;
+    }
     if gateway.peer.is_some() {
         return;
     }
@@ -1727,6 +1758,7 @@ pub fn on_gateway_response(
 /// match (M6 → M5), the `MatchRevoked` moderation push, and the `MatchCorrected`
 /// score-correction push. A pairing opens the confirmation dialog instead of
 /// auto-challenging.
+#[allow(clippy::too_many_arguments)]
 pub fn on_gateway_request(
     ev: On<NetEvent>,
     state: Res<State<AppState>>,
@@ -1737,6 +1769,7 @@ pub fn on_gateway_request(
     mut gateway: ResMut<GatewayState>,
     mut active: ResMut<ActiveMatch>,
     mut history: ResMut<MatchHistory>,
+    mut reconn: ResMut<ReconnectionState>,
     channels: Res<NetChannels>,
 ) {
     let NetEvent::GatewayRequest { peer, request } = ev.event() else {
@@ -1776,10 +1809,15 @@ pub fn on_gateway_request(
             // Remember the gateway-assigned id so the eventual result report
             // can be correlated (and revoked) server-side.
             active.0 = *match_id;
-            for addr in addresses {
-                if let Ok(multiaddr) = addr.parse::<Multiaddr>() {
-                    let _ = channels.commands.send(NetCommand::Dial(multiaddr));
-                }
+            // Keep the dial addresses around so a mid-match drop can re-dial
+            // the opponent directly instead of waiting on libp2p's (slow,
+            // backoff-heavy) background reconnect.
+            reconn.addresses = addresses
+                .iter()
+                .filter_map(|addr| addr.parse::<Multiaddr>().ok())
+                .collect();
+            for addr in &reconn.addresses {
+                let _ = channels.commands.send(NetCommand::Dial(addr.clone()));
             }
         }
         GatewayRequest::MatchRevoked {
@@ -2021,10 +2059,14 @@ pub fn on_enter_playing(
     mut reconn: ResMut<ReconnectionState>,
 ) {
     search.0 = false;
-    // A fresh match always starts with a clean reconnection state.
+    // A fresh match always starts with a clean reconnection state. The dial
+    // addresses are kept: they were recorded before entering `Playing` and
+    // are what `update_reconnection` uses to bring a mid-match drop back.
     reconn.active = false;
     reconn.countdown = None;
     reconn.target = None;
+    reconn.redial_accum = 0.0;
+    sim::set_peer_link_up(true);
     if gateway.queued
         && let Some(peer) = gateway.peer
     {
@@ -2041,6 +2083,7 @@ pub fn on_enter_playing(
 /// opponent). When a fresh match is already lined up — a remote request
 /// arrived while we were mid-game — the swap state is left intact so
 /// [`enter_pending_match`] can finish it on the next frame.
+#[allow(clippy::too_many_arguments)]
 pub fn on_exit_playing(
     mut search: ResMut<AutoSearch>,
     mut pre: ResMut<PreMatch>,
@@ -2048,6 +2091,7 @@ pub fn on_exit_playing(
     mut matched: ResMut<GatewayMatch>,
     mut active: ResMut<ActiveMatch>,
     mut intent: ResMut<MatchIntent>,
+    mut reconn: ResMut<ReconnectionState>,
     pending: Res<PendingMatch>,
 ) {
     search.0 = false;
@@ -2056,6 +2100,9 @@ pub fn on_exit_playing(
     // this system); a fresh pairing will set it again.
     active.0 = 0;
     *intent = MatchIntent::Idle;
+    // The next match gets its own addresses from its own `MatchFound` (or from
+    // the relay reconstruction fallback), so don't carry the last opponent's.
+    reconn.addresses.clear();
     // A queued replacement match (Playing → Menu → Playing) is on its way:
     // keep the new opponent and the pending marker.
     if pending.0.is_some() {
@@ -2145,10 +2192,20 @@ pub fn on_peer_disconnected(
     mut pending: ResMut<PendingMatch>,
     mut reconn: ResMut<ReconnectionState>,
     mut pre: ResMut<PreMatch>,
+    mut gateway: ResMut<GatewayState>,
 ) {
     let NetEvent::PeerDisconnected(peer) = ev.event() else {
         return;
     };
+    // If the gateway/relay itself went down, remember that its state is stale
+    // so `on_identity` (on reconnect) and `update_reconnection` re-arm the
+    // relay reservation; without it, relayed circuits between the players can
+    // never come back.
+    if gateway.peer == Some(*peer) {
+        gateway.connected = false;
+        gateway.reserved = false;
+        info!("Gateway {peer} disconnected");
+    }
     if opponent.0 != Some(*peer) {
         return;
     }
@@ -2158,10 +2215,17 @@ pub fn on_peer_disconnected(
     // come back instead of ending the game on the first network blip.
     if *state == AppState::Playing && !match_over.0 {
         info!("Opponent {peer} connection dropped; waiting {RECONNECT_GRACE_SECS:.0}s for the circuit to come back");
+        // Pause the host's snapshot broadcast so it stops hammering the dead
+        // peer with ~30 failed sends/sec; the sim thread resumes it as soon as
+        // the link is marked up again.
+        sim::set_peer_link_up(false);
         pending.0 = None;
         reconn.target = Some(*peer);
         reconn.active = true;
         reconn.countdown = Some(Timer::from_seconds(RECONNECT_GRACE_SECS, TimerMode::Once));
+        // Dial immediately on the next frame instead of after the first
+        // REDIAL_EVERY_SECS pause.
+        reconn.redial_accum = REDIAL_EVERY_SECS;
         return;
     }
 
@@ -3389,12 +3453,24 @@ pub fn update_node_graph(
 /// come back in time, abandons the match and returns to the menu (an unfinished
 /// match records no result). If the same opponent reconnects first, the
 /// abandonment is cancelled by `on_peer_connected` and play resumes.
+///
+/// Instead of trusting libp2p's background reconnect alone (its exponential
+/// backoff can leave the whole grace window without an attempt), every
+/// [`REDIAL_EVERY_SECS`] we re-dial the addresses that first reached the
+/// opponent — the relayed circuit address the gateway handed out in
+/// `MatchFound`, or a fresh one rebuilt from the live gateway connection. If
+/// the gateway link itself dropped, we also re-dial it and re-request the
+/// relay reservation, since a dead reservation makes those circuit addresses
+/// unreachable no matter how often we dial them.
+#[allow(clippy::too_many_arguments)]
 pub fn update_reconnection(
     mut reconn: ResMut<ReconnectionState>,
     mut next: ResMut<NextState<AppState>>,
     state: Res<State<AppState>>,
     opponent: Res<Opponent>,
     mut pending: ResMut<PendingMatch>,
+    channels: Res<NetChannels>,
+    gateway: Res<GatewayState>,
     time: Res<Time>,
 ) {
     let Some(target) = reconn.target else {
@@ -3419,10 +3495,60 @@ pub fn update_reconnection(
         info!("Opponent {target} did not come back; abandoning the match");
         reconn.active = false;
         reconn.target = None;
+        reconn.addresses.clear();
         pending.0 = None;
         if *state == AppState::Playing {
             next.set(AppState::Menu);
         }
+        return;
     }
+
+    // Give the swarm a fresh nudge every couple of seconds. Dial the
+    // addresses the opponent was originally reached through, plus a
+    // just-in-time circuit address rebuilt from the live gateway.
+    reconn.redial_accum += time.delta_secs();
+    if reconn.redial_accum < REDIAL_EVERY_SECS {
+        return;
+    }
+    reconn.redial_accum = 0.0;
+
+    info!("Re-dialing opponent {target}");
+    for addr in &reconn.addresses {
+        let _ = channels.commands.send(NetCommand::Dial(addr.clone()));
+    }
+    if let Some(circuit_addr) = opponent_relay_addr(&gateway, &target) {
+        let _ = channels.commands.send(NetCommand::Dial(circuit_addr));
+    }
+
+    // The gateway/relay link may have been the thing that dropped. Re-dial it
+    // and, if the reservation is gone, ask for a fresh one so relayed
+    // circuits to us (and re-dials of the addresses above) start working
+    // again.
+    if let Some(gw) = gateway.peer
+        && let Some(base) = gateway.base_addr()
+    {
+        if !gateway.connected {
+            let _ = channels.commands.send(NetCommand::Dial(base.clone()));
+        }
+        if !gateway.reserved {
+            let mut circuit = base;
+            circuit.push(Protocol::P2p(gw));
+            circuit.push(Protocol::P2pCircuit);
+            let _ = channels.commands.send(NetCommand::Listen(circuit));
+        }
+    }
+}
+
+/// Builds a relayed circuit address for `opponent` through the active gateway,
+/// the same shape the gateway sends in `MatchFound`. Used as a fallback when
+/// the original dial addresses are gone (e.g. a match that started from a LAN
+/// invite while a gateway reservation was still alive).
+fn opponent_relay_addr(gateway: &GatewayState, opponent: &PeerId) -> Option<Multiaddr> {
+    let gw = gateway.peer?;
+    let mut addr = gateway.base_addr()?;
+    addr.push(Protocol::P2p(gw));
+    addr.push(Protocol::P2pCircuit);
+    addr.push(Protocol::P2p(*opponent));
+    Some(addr)
 }
 

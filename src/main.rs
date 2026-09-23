@@ -72,6 +72,11 @@ struct OpponentScore;
 #[derive(Component)]
 struct Hud;
 
+/// Overlay shown while a dropped opponent connection is within its reconnect
+/// grace window, so the frozen field reads as "reconnecting" instead of broken.
+#[derive(Component)]
+struct ReconnectOverlay;
+
 #[derive(Component)]
 #[require(Position, Collider)]
 struct Gutter;
@@ -446,11 +451,48 @@ fn cleanup_playing(
             With<Gutter>,
             With<Hud>,
             With<GameOverRoot>,
+            With<ReconnectOverlay>,
         )>,
     >,
 ) {
     for entity in &game {
         commands.entity(entity).despawn();
+    }
+}
+
+/// Spawns the in-game reconnect overlay (hidden by default, shown while a
+/// dropped opponent is within its reconnect grace window).
+fn spawn_reconnect_overlay(mut commands: Commands) {
+    commands.spawn((
+        ReconnectOverlay,
+        Node {
+            width: percent(100.0),
+            height: percent(100.0),
+            position_type: PositionType::Absolute,
+            top: px(0.0),
+            left: px(0.0),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            display: Display::None,
+            ..default()
+        },
+        children![(
+            Text::new("Reconectando… volviendo a conectar con el rival"),
+            TextFont::from_font_size(24.0),
+            TextColor(Color::srgb(1.0, 0.85, 0.4)),
+            TextLayout::justify(Justify::Center),
+        )],
+    ));
+}
+
+/// Show/hide the reconnect overlay with the reconnection state.
+fn update_reconnect_overlay(
+    reconn: Res<menu::ReconnectionState>,
+    mut overlay: Query<&mut Node, With<ReconnectOverlay>>,
+) {
+    for mut node in &mut overlay {
+        let show = reconn.active && reconn.target.is_some();
+        node.display = if show { Display::Flex } else { Display::None };
     }
 }
 
@@ -605,6 +647,7 @@ fn main() {
                 spawn_ball,
                 spawn_scoreboard,
                 spawn_game_over_ui,
+                spawn_reconnect_overlay,
                 reset_score,
                 reset_match_over,
                 networking_demo::reset_match_state,
@@ -649,6 +692,10 @@ fn main() {
         .add_systems(
             Update,
             update_game_over_ui.run_if(in_state(AppState::Playing)),
+        )
+        .add_systems(
+            Update,
+            update_reconnect_overlay.run_if(in_state(AppState::Playing)),
         )
         .add_observer(networking_demo::on_peer_connected)
         .add_observer(networking_demo::on_peer_disconnected)
@@ -776,6 +823,9 @@ mod networking_demo {
                 reconn.active = false;
                 reconn.countdown = None;
                 reconn.target = None;
+                // The link being back is what reactivates the host's snapshot
+                // broadcast, which we parked while the peer was gone.
+                crate::sim::set_peer_link_up(true);
             }
             // M6: the opponent the gateway matched us with connected. The match
             // itself is gated by the pre-match dialog; flush an acceptance that

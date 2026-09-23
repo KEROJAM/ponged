@@ -7,6 +7,7 @@
 //! snapshot broadcast) on a plain thread driven by a wall clock fixes that,
 //! because the simulation no longer depends on the window at all.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -106,6 +107,23 @@ static REMOTE_PADDLE_SINK: Mutex<Option<Sender<SimCommand>>> = Mutex::new(None);
 
 fn set_remote_paddle_sink(sink: Option<Sender<SimCommand>>) {
     *REMOTE_PADDLE_SINK.lock().expect("paddle sink poisoned") = sink;
+}
+
+/// Whether the opponent's link is currently up. While a mid-match drop is being
+/// reconnected, the simulation thread keeps stepping (so the host's own field
+/// keeps rendering) but pauses its ~30 Hz snapshot broadcast; blasting requests
+/// at a dead peer just floods the log with `DialFailure` and makes libp2p dial
+/// the peer's (unreachable) addresses on every tick.
+static PEER_LINK_UP: AtomicBool = AtomicBool::new(true);
+
+/// Marks the opponent's link up or down. Set by the connection observers in
+/// `menu.rs` / `main.rs`.
+pub fn set_peer_link_up(up: bool) {
+    PEER_LINK_UP.store(up, Ordering::Relaxed);
+}
+
+fn peer_link_up() -> bool {
+    PEER_LINK_UP.load(Ordering::Relaxed)
 }
 
 /// Clone of the sink for the networking thread (or `None` if no match sim is
@@ -475,10 +493,15 @@ fn run_sim(
 
         if now.saturating_duration_since(last_snapshot) >= SNAPSHOT_DT {
             let snapshot = build_snapshot(&state);
-            let _ = net_commands.send(NetCommand::SendRequest {
-                peer,
-                request: Request::State(snapshot),
-            });
+            // While the opponent's link is down (reconnect grace), don't blast
+            // snapshots at a dead peer — every send would make request-response
+            // dial its gone addresses and fail with a log line each.
+            if peer_link_up() {
+                let _ = net_commands.send(NetCommand::SendRequest {
+                    peer,
+                    request: Request::State(snapshot),
+                });
+            }
             state.seq += 1;
             last_snapshot = now;
         }
