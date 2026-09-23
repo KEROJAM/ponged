@@ -85,8 +85,26 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install mingw -y --no-progress
 
+      # OpenSSL vendored (openssl-src) exige un perl "Unix-like" (paths con /)
+      # y un make estilo MSYS: el perl nativo MSWin32 de Strawberry que trae el
+      # runner falla ("This perl implementation doesn't produce Unix like
+      # paths"). MSYS2 aporta ese perl/make; con `path-type: inherit` quedan
+      # primeros en el PATH del shell y el gcc/ar de MinGW-w64 (choco) se
+      # hereda para el resto.
+      - name: Instalar MSYS2 (perl/make Unix-like para OpenSSL vendored)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          path-type: inherit
+          install: >-
+            make
+            perl
+
       - name: Compilar cliente y servidor en release (Windows)
         if: runner.os == 'Windows'
+        shell: msys2 {0}
         run: cargo build --release --target ${{ matrix.target }} --bin ponged-cliente --bin ponged-gateway
 
       - name: Empaquetar binarios (Windows)
