@@ -1,3 +1,7 @@
+// The game ships with its own window (Bevy/winit); on Windows the release
+// executable targets the GUI subsystem so no console window is spawned.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use bevy::camera::ScalingMode;
 use bevy::math::bounding::{Aabb2d, BoundingVolume, IntersectsVolume};
 use bevy::prelude::*;
