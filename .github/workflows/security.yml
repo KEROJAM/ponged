@@ -16,6 +16,8 @@ name: Seguridad (OWASP ZAP)
 #     ghcr.io/zaproxy/zaproxy:stable \
 #     zap-baseline.py -t http://127.0.0.1:8080 \
 #       -J /zap/wrk/report.json -r /zap/wrk/report.html
+#   # Nota: /tmp/zap debe ser escribible por el UID 1000 (usuario zap del
+#   # contenedor), p.ej. chmod -R a+w /tmp/zap.
 
 on:
   push:
@@ -78,6 +80,9 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p /tmp/owasp/zap
+          # ZAP corre como usuario zap (UID 1000); sin escritura en el volumen
+          # montado no puede copiar su plan (zap.yaml) ni escribir report.json.
+          chmod -R a+rwX /tmp/owasp/zap
           set +e
           docker run --rm --network host -v /tmp/owasp/zap:/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
