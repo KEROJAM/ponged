@@ -15,7 +15,10 @@ name: Seguridad (OWASP ZAP)
 #   docker run --rm --network host -v /tmp/zap:/zap/wrk:rw \
 #     ghcr.io/zaproxy/zaproxy:stable \
 #     zap-baseline.py -t http://127.0.0.1:8080 \
-#       -J /zap/wrk/report.json -r /zap/wrk/report.html
+#       -J report.json -r report.html
+#   # Ojo: pasar rutas absolutas (-r /zap/wrk/report.html) rompe el job
+#   # 'report' del Automation Framework (ruta duplicada /zap/wrk/zap/wrk/),
+#   # así que usar siempre nombres relativos.
 #   # Nota: /tmp/zap debe ser escribible por el UID 1000 (usuario zap del
 #   # contenedor), p.ej. chmod -R a+w /tmp/zap.
 
@@ -84,11 +87,15 @@ jobs:
           # montado no puede copiar su plan (zap.yaml) ni escribir report.json.
           chmod -R a+rwX /tmp/owasp/zap
           set +e
+          # Nombres relativos: el WORKDIR del contenedor es /zap/wrk (el
+          # volumen montado). Con rutas absolutas (p.ej. /zap/wrk/report.html)
+          # el job 'report' del Automation Framework concatena reportDir +
+          # reportFile y acaba escribiendo en /zap/wrk/zap/wrk/report.html.
           docker run --rm --network host -v /tmp/owasp/zap:/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py -t http://127.0.0.1:8080 \
-              -J /zap/wrk/report.json \
-              -r /zap/wrk/report.html > /tmp/owasp/zap/zap.log 2>&1
+              -J report.json \
+              -r report.html > /tmp/owasp/zap/zap.log 2>&1
           rc=$?
           echo "exit del escaneo: $rc"
           echo "=== contenido de /tmp/owasp/zap ==="

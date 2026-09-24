@@ -36,10 +36,14 @@ echo "pass" | ./target/debug/ponged-gateway --db /tmp/gw.sqlite \
 
 # 3) Escaneo (requiere Docker)
 mkdir -p /tmp/zap
+# Nombres relativos: el WORKDIR del contenedor es /zap/wrk (el volumen
+# montado). Con rutas absolutas (-r /zap/wrk/report.html) el job 'report'
+# del Automation Framework duplica la ruta (/zap/wrk/zap/wrk/report.html)
+# y falla con NoSuchFileException.
 docker run --rm --network host -v /tmp/zap:/zap/wrk:rw \
   ghcr.io/zaproxy/zaproxy:stable \
   zap-baseline.py -t http://127.0.0.1:8080 \
-    -J /zap/wrk/report.json -r /zap/wrk/report.html
+    -J report.json -r report.html
 
 # 4) Revisar: abrir /tmp/zap/report.html (o parsear report.json)
 ```
